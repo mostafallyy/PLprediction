@@ -1,0 +1,38 @@
+name: Daily PL data refresh + retrain
+
+on:
+  schedule:
+    # 06:00 UTC daily - after most PL matches from the prior day are final
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}  # allows manual "Run workflow" trigger too
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline (ingest -> silver -> gold -> train)
+        env:
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: bash run_pipeline.sh
+
+      - name: Commit refreshed gold table + model
+        run: |
+          git config user.name "pl-predictor-bot"
+          git config user.email "actions@github.com"
+          git add data/gold/match_features.parquet models/
+          git diff --cached --quiet || git commit -m "Daily refresh: data + retrained model [skip ci]"
+          git push
+
+      # Optional: trigger a redeploy on Render after a successful retrain.
+      # Uncomment once RENDER_DEPLOY_HOOK_URL is added as a repo secret.
+      # - name: Trigger Render redeploy
+      #   run: curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
