@@ -1,17 +1,10 @@
 # Premier League Match Predictor
 
 A live-data pipeline that predicts Premier League match outcomes: daily
-ingestion, a medallion-architecture transform layer, a leakage-checked
-LightGBM model tracked in MLflow, and a FastAPI service that returns
-win/draw/loss probabilities for upcoming fixtures.
-
-## Problem
-
-Predict the outcome (home win / draw / away win) of Premier League
-matches before kickoff, using only information that would genuinely be
-available in advance - recent form, home/away splits, head-to-head
-history, and rest days. No post-match data (final score, etc.) is ever
-allowed to reach the model; see "Leakage discipline" below.
+ingestion, a PySpark medallion pipeline (bronze/silver/gold) on
+Databricks with Delta Lake, a leakage-checked LightGBM model tracked in
+MLflow, and a FastAPI service that returns win/draw/loss probabilities
+for upcoming fixtures.
 
 ## Architecture
 
@@ -19,73 +12,117 @@ allowed to reach the model; see "Leakage discipline" below.
 football-data.org API
         |
         v
-  Bronze  (data/bronze)   <- raw JSON, untouched, partitioned by pull date
+  Bronze  (Databricks, Delta) <- raw JSON, untouched, partitioned by pull date
         |
         v
-  Silver  (data/silver)   <- cleaned, typed, one row per match
+  Silver  (Databricks, Delta) <- cleaned, typed, one row per match
         |
         v
-  Gold    (data/gold)     <- pre-match features, tagged safe/leakage,
-                              built for BOTH finished and upcoming matches
+  Gold    (Databricks, Delta) <- pre-match features, tagged safe/leakage,
+                                  built for BOTH finished and upcoming matches
         |
         v
-  Model   (models/)       <- LightGBM, time-based train/val/test split,
-                              early stopping, MLflow-tracked
+  Model   (Databricks, MLflow) <- LightGBM, time-based train/val/test split,
+                                   early stopping
         |
         v
-  Serving (src/app.py)    <- FastAPI /predictions endpoint, Dockerized
+  Serving (local FastAPI, src/app.py) <- pulls the trained model + gold
+                                          features down and serves /predictions
 ```
 
-`run_pipeline.sh` chains ingest -> silver -> gold -> train into one
-command; `.github/workflows/daily_pipeline.yml` runs it daily and
-commits the refreshed gold table and model.
+Everything from raw API pull through model training runs as real PySpark
+on Databricks (`databricks_notebooks/`), wired into a single scheduled
+Databricks Job (`pl_predictor_daily_pipeline`, daily at 06:00 UTC,
+currently paused - enable it in the Databricks Jobs UI to go live). A
+lightweight local pipeline (`src/`, plain pandas) exists as a dev/offline
+mode for iterating on logic without touching the workspace, and is what
+`run_pipeline.sh` runs directly.
 
-## Leakage discipline
+## Databricks notebooks (`databricks_notebooks/`)
 
-Every gold-layer column is tagged in `src/gold_features.py` as either
-`pre_match` (safe to train/serve on) or `post_match` (kept only for
-building the label, e.g. final score - never fed to the model). Rolling
-form is computed with `pandas.merge_asof(..., allow_exact_matches=False)`
-so a match can only see form built from matches strictly BEFORE it,
-including for upcoming fixtures.
+| Notebook | Does |
+|---|---|
+| `01_bronze_ingest.py` | Pulls matches/standings/teams from football-data.org (API key from a Databricks secret), lands raw JSON as a Delta table |
+| `02_silver_transform.py` | Parses/cleans into one typed row per match |
+| `03_gold_features.py` | Builds pre-match features with Spark window functions - see below |
+| `04_train_model.py` | LightGBM, time-based split, MLflow-tracked, publishes the model to `pl_predictor_gold.latest_model` |
+| `00_run_all.py` | Chains all four via `%run`, for a manual one-click run |
 
-The train/val/test split is **time-based, not random**: the model
-trains on the earliest matches, validates (for early stopping) on the
-next slice, and is scored on the most recent, held-out slice - never a
-random shuffle, which would leak future form into the past.
+### The as-of join, without `merge_asof`
+
+Spark has no `pandas.merge_asof`. The gold notebook rebuilds "this
+team's form strictly before this match" (needed for BOTH finished
+results and future fixtures) with window functions: compute each team's
+rolling form as of right after every finished match, attach that
+snapshot back onto its own row, then carry it forward with
+`last(..., ignoreNulls=True)` over `rowsBetween(unboundedPreceding, -1)`
+- "the last known snapshot from a strictly earlier row" - onto every
+row, finished or scheduled.
+
+### Leakage discipline
+
+Every gold-layer column is tagged `pre_match` (safe to train/serve on)
+or `post_match` (kept only for the label - final score, winner - never
+fed to the model). The train/val/test split is time-based, not random.
 
 ## Data
 
-Because this is early in the current PL season, the current season
-alone doesn't yet have enough finished matches to train on. The
-ingestion script pulls the current season (for upcoming fixtures to
-predict) plus the last two completed seasons (for training history),
-merged into one bronze table.
+Early in a new PL season there aren't enough finished matches to train
+on, so ingestion pulls the current season (for fixtures to predict) plus
+the last two completed seasons (for training history).
 
-## Validation numbers (honest, not cherry-picked)
-
-Measured on a held-out, time-ordered test slice (most recent matches),
-against two naive baselines:
+## Validation numbers (Databricks-trained, honest, not cherry-picked)
 
 | Metric | Model | Naive baseline |
 |---|---|---|
-| Accuracy | ~0.49 | 0.44 (always predict majority class) |
+| Accuracy | ~0.48 | 0.43 (always predict majority class) |
 | Log loss | ~1.07 | 1.08 (predict training class frequencies) |
 
-This is a modest but real lift over guessing - expected for an early
-baseline with ~300 training matches and 11 features, no player-level
-data, and no tuning beyond basic regularization + early stopping. The
-model is re-trained daily as more matches finish, and this table should
-be re-measured periodically rather than trusted as a permanent number.
+A modest but real lift over guessing - expected for ~300 training
+matches, 11 features, no player-level data. Re-trained daily; re-measure
+periodically rather than trusting this as a permanent number.
 
-## Running it
+## Running the Databricks pipeline
+
+Requires a Databricks workspace (Community Edition/Free Edition works -
+this was built and validated against a serverless free-tier workspace)
+and a personal access token.
+
+```bash
+export DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com
+export DATABRICKS_TOKEN=<your-token>
+
+# one-time setup
+databricks secrets create-scope pl_predictor
+databricks secrets put-secret pl_predictor football_data_api_key --string-value <your-football-data-key>
+databricks workspace import-dir databricks_notebooks /Workspace/Shared/pl_predictor
+
+# ad-hoc run of one notebook, e.g. via the Jobs API runs/submit,
+# or open 00_run_all in the workspace UI and Run All
+```
+
+The daily schedule is a Databricks Job (`pl_predictor_daily_pipeline`,
+06:00 UTC) chaining all four notebooks with task dependencies -
+enable/disable it from the Jobs UI.
+
+### Note on Community/Free Edition compute
+
+This workspace has no classic clusters ("no associated worker
+environments") - it's serverless-only. Jobs run fine on serverless job
+compute; `dbutils.fs.cp` to `dbfs:/` and the raw MLflow-artifact/DBFS
+REST proxy are blocked under Unity Catalog, so the trained model is
+published to a Delta table (`pl_predictor_gold.latest_model`, model
+bytes as base64) instead - queryable through the SQL Warehouse, which
+is how the local FastAPI service pulls it down.
+
+## Running the local (pandas) dev pipeline
 
 ```bash
 pip install -r requirements.txt
 export FOOTBALL_DATA_API_KEY=your_key   # https://www.football-data.org/client/register
 
 bash run_pipeline.sh                     # ingest -> silver -> gold -> train
-uvicorn src.app:app --reload --port 8000 # serve predictions
+uvicorn src.app:app --reload --port 8000
 curl http://localhost:8000/predictions
 ```
 
@@ -98,7 +135,7 @@ docker run -p 8000:8000 pl-predictor
 
 ## What's next
 
-- Deploy the container to Render for a public URL
+- Deploy the FastAPI container to Render for a public URL
 - Add a dashboard (Streamlit or Power BI) over `/predictions`
 - Player-level features (injuries, suspensions)
 - Multi-league expansion
