@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .env
 .databricks_env
+.ipynb_checkpoints/
