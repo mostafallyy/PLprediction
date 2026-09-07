@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PL Match Predictor</title>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --bg-elev: #12172352;
+    --card: #131a2acc;
+    --card-solid: #131a2a;
+    --border: #232b3f;
+    --text: #eef1f8;
+    --text-dim: #8b93a7;
+    --text-faint: #565f76;
+    --accent: #7c5cff;
+    --accent-2: #ff5c8a;
+    --home: #4fd6a8;
+    --draw: #ffcc66;
+    --away: #ff6b7a;
+    --radius: 16px;
+    --shadow: 0 20px 60px -20px rgba(0,0,0,0.6);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: radial-gradient(1200px 600px at 20% -10%, #1a1f3a 0%, transparent 60%),
+                radial-gradient(1000px 500px at 100% 0%, #241735 0%, transparent 55%),
+                var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  a { color: inherit; }
+  ::selection { background: var(--accent); color: #fff; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 80px; }
+
+  header.top { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 28px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .mark {
+    width: 40px; height: 40px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; box-shadow: 0 8px 24px -8px rgba(124,92,255,0.6);
+  }
+  .brand h1 { font-size: 19px; margin: 0; letter-spacing: -0.02em; }
+  .brand p { margin: 2px 0 0; font-size: 12.5px; color: var(--text-dim); }
+
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-dim);
+    background: var(--card); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 999px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+  .dot.ok { background: var(--home); box-shadow: 0 0 8px var(--home); }
+  .dot.bad { background: var(--away); box-shadow: 0 0 8px var(--away); }
+
+  /* Matchweek picker */
+  .mw-picker { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px 14px; margin-bottom: 8px; scrollbar-width: thin; }
+  .mw-picker::-webkit-scrollbar { height: 5px; }
+  .mw-picker::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .mw-chip {
+    flex: 0 0 auto; cursor: pointer; user-select: none;
+    padding: 9px 16px; border-radius: 12px;
+    background: var(--card); border: 1px solid var(--border);
+    font-size: 13px; color: var(--text-dim); font-weight: 600;
+    transition: all .15s ease;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    min-width: 68px;
+  }
+  .mw-chip span.sub { font-size: 10px; font-weight: 500; color: var(--text-faint); }
+  .mw-chip:hover { border-color: var(--accent); color: var(--text); transform: translateY(-1px); }
+  .mw-chip.active {
+    background: linear-gradient(135deg, var(--accent), #5a3fd6);
+    color: #fff; border-color: transparent;
+    box-shadow: 0 8px 20px -8px rgba(124,92,255,0.7);
+  }
+  .mw-chip.active span.sub { color: rgba(255,255,255,0.75); }
+
+  .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin: 28px 0 14px; font-weight: 700; }
+
+  /* Fixture cards */
+  .fixtures { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .fixture {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px; cursor: pointer; transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+    backdrop-filter: blur(20px);
+    position: relative; overflow: hidden;
+  }
+  .fixture:hover { transform: translateY(-3px); border-color: #3a3560; box-shadow: var(--shadow); }
+  .fixture .date-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  .fixture .date { font-size: 11.5px; color: var(--text-faint); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+  .fixture .badge {
+    font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px;
+    background: rgba(124,92,255,0.15); color: #b3a3ff; border: 1px solid rgba(124,92,255,0.3);
+  }
+  .fixture .badge.finished { background: rgba(79,214,168,0.12); color: var(--home); border-color: rgba(79,214,168,0.3); }
+
+  .teams-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 16px; }
+  .team-col { display: flex; flex-direction: column; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  .team-col img { width: 40px; height: 40px; object-fit: contain; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.4)); }
+  .team-col .tname { font-size: 12.5px; font-weight: 600; text-align: center; line-height: 1.2; }
+  .vs-mid { font-size: 11px; color: var(--text-faint); font-weight: 700; padding-top: 8px; }
+  .score-mid { font-size: 22px; font-weight: 800; padding-top: 0; letter-spacing: -0.02em; }
+
+  .prob-bar { display: flex; height: 9px; border-radius: 6px; overflow: hidden; background: #1a2032; margin-bottom: 8px; }
+  .prob-bar .seg { transition: width .4s cubic-bezier(.22,.61,.36,1); }
+  .prob-bar .seg.home { background: linear-gradient(90deg, var(--home), #3fc396); }
+  .prob-bar .seg.draw { background: linear-gradient(90deg, var(--draw), #f0b84a); }
+  .prob-bar .seg.away { background: linear-gradient(90deg, var(--away), #e8505f); }
+
+  .prob-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); font-weight: 600; }
+  .prob-labels .val.lead { color: var(--text); }
+
+  .confidence-tag { position: absolute; top: 14px; right: 14px; }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
+  .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.6; }
+
+  /* Modal */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(5,7,14,0.72); backdrop-filter: blur(6px);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 40px 16px; overflow-y: auto; z-index: 50;
+    opacity: 0; pointer-events: none; transition: opacity .18s ease;
+  }
+  .modal-overlay.open { opacity: 1; pointer-events: auto; }
+  .modal {
+    background: var(--card-solid); border: 1px solid var(--border); border-radius: 20px;
+    max-width: 760px; width: 100%; padding: 28px; position: relative;
+    transform: translateY(14px) scale(0.98); transition: transform .2s ease;
+    box-shadow: 0 40px 100px -30px rgba(0,0,0,0.8);
+  }
+  .modal-overlay.open .modal { transform: translateY(0) scale(1); }
+  .modal-close {
+    position: absolute; top: 18px; right: 18px; width: 32px; height: 32px; border-radius: 10px;
+    background: var(--bg-elev); border: 1px solid var(--border); color: var(--text-dim);
+    display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 16px;
+  }
+  .modal-close:hover { color: var(--text); border-color: var(--accent); }
+
+  .modal-header { display: flex; align-items: center; justify-content: center; gap: 28px; margin-bottom: 8px; padding-right: 20px; }
+  .modal-header .team-col img { width: 56px; height: 56px; }
+  .modal-header .team-col .tname { font-size: 15px; }
+  .modal-header .vs-mid { font-size: 13px; padding-top: 18px; }
+
+  .modal-prob { max-width: 420px; margin: 18px auto 26px; }
+
+  .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+  .tab {
+    padding: 9px 4px; margin-right: 18px; font-size: 13px; font-weight: 700; color: var(--text-faint);
+    cursor: pointer; border-bottom: 2px solid transparent; transition: all .15s ease;
+  }
+  .tab:hover { color: var(--text-dim); }
+  .tab.active { color: var(--text); border-color: var(--accent); }
+
+  .tab-panel { display: none; animation: fadein .2s ease; }
+  .tab-panel.active { display: block; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+  .h2h-summary { display: flex; gap: 10px; margin-bottom: 16px; }
+  .h2h-stat { flex: 1; text-align: center; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; padding: 12px 8px; }
+  .h2h-stat .n { font-size: 20px; font-weight: 800; }
+  .h2h-stat .l { font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
+
+  .h2h-list { display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow-y: auto; }
+  .h2h-row {
+    display: grid; grid-template-columns: 70px 1fr auto 1fr; align-items: center; gap: 10px;
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px;
+    font-size: 12.5px;
+  }
+  .h2h-row .d { color: var(--text-faint); font-size: 11px; }
+  .h2h-row .t { text-align: right; font-weight: 600; }
+  .h2h-row .t.away-side { text-align: left; }
+  .h2h-row .sc { font-weight: 800; font-size: 13.5px; padding: 0 6px; white-space: nowrap; }
+
+  .squads-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  .squad-col h4 { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 0 0 10px; }
+  .squad-col h4 img { width: 20px; height: 20px; object-fit: contain; }
+  .squad-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; padding-right: 4px; }
+  .player-row { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; padding: 6px 10px; border-radius: 8px; background: var(--bg-elev); }
+  .player-row .pname { font-weight: 600; }
+  .player-row .ppos { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em; }
+
+  footer { text-align: center; margin-top: 50px; color: var(--text-faint); font-size: 11.5px; line-height: 1.7; }
+  footer a { color: var(--text-dim); text-decoration: underline; text-underline-offset: 2px; }
+
+  .skeleton { background: linear-gradient(90deg, var(--card) 25%, #1c2438 37%, var(--card) 63%); background-size: 400% 100%; animation: shimmer 1.4s ease infinite; border-radius: var(--radius); height: 190px; }
+  @keyframes shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
+  @media (max-width: 560px) {
+    .squads-grid { grid-template-columns: 1fr; }
+    .modal-header { gap: 14px; }
+    .modal-header .team-col img { width: 44px; height: 44px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="mark">⚽</div>
+      <div>
+        <h1>PL Match Predictor</h1>
+        <p>LightGBM · leakage-checked · trained on a PySpark/Delta Lake pipeline</p>
+      </div>
+    </div>
+    <div class="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">Connecting…</span></div>
+  </header>
+
+  <div class="mw-picker" id="mw-picker"></div>
+
+  <div id="content">
+    <div class="section-title">Loading fixtures</div>
+    <div class="fixtures">
+      <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+    </div>
+  </div>
+
+  <footer>
+    Model accuracy/log-loss are validated against naive baselines on a held-out, time-ordered test set.
+    Squad rosters are each team's current registered squad (football-data.org free tier doesn't expose
+    past match lineups) — not necessarily last match's starting XI.
+    <br>Free-tier API may take 30–60s to wake up on first load.
+  </footer>
+</div>
+
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal" id="modal"></div>
+</div>
+
+<script>
+const API = ''; // same-origin
+
+let teamsCache = null;
+let matchweeksCache = null;
+let currentMatchday = null;
+
+async function getJSON(url) {
+  const res = await fetch(API + url);
+  if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+  return res.json();
+}
+
+function setStatus(ok, text) {
+  document.getElementById('status-dot').className = 'dot ' + (ok ? 'ok' : 'bad');
+  document.getElementById('status-text').textContent = text;
+}
+
+function fmtDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) +
+         ' · ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtShortDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function pct(x) { return x == null ? '–' : Math.round(x * 100) + '%'; }
+
+function leadOutcome(f) {
+  if (f.status === 'FINISHED') return null;
+  const probs = { Home: f.home_win_prob, Draw: f.draw_prob, Away: f.away_win_prob };
+  let best = null, bestVal = -1;
+  for (const [k, v] of Object.entries(probs)) if (v != null && v > bestVal) { best = k; bestVal = v; }
+  return { label: best, val: bestVal };
+}
+
+function fixtureCard(f) {
+  const finished = f.status === 'FINISHED';
+  const lead = leadOutcome(f);
+  const h = f.home_win_prob ?? 0.333, d = f.draw_prob ?? 0.333, a = f.away_win_prob ?? 0.333;
+
+  return `
+    <div class="fixture" data-match-id="${f.match_id}">
+      <div class="date-row">
+        <span class="date">${fmtDate(f.utc_date)}</span>
+        <span class="badge ${finished ? 'finished' : ''}">${finished ? 'FT' : (lead ? pct(lead.val) + ' ' + lead.label : 'Upcoming')}</span>
+      </div>
+      <div class="teams-row">
+        <div class="team-col">
+          <img src="${f.home_team_crest || ''}" onerror="this.style.visibility='hidden'" alt="">
+          <div class="tname">${f.home_team}</div>
+        </div>
+        ${finished
+          ? `<div class="score-mid">${f.home_goals} – ${f.away_goals}</div>`
+          : `<div class="vs-mid">VS</div>`}
+        <div class="team-col">
+          <img src="${f.away_team_crest || ''}" onerror="this.style.visibility='hidden'" alt="">
+          <div class="tname">${f.away_team}</div>
+        </div>
+      </div>
+      ${!finished ? `
+        <div class="prob-bar">
+          <div class="seg home" style="width:${h*100}%"></div>
+          <div class="seg draw" style="width:${d*100}%"></div>
+          <div class="seg away" style="width:${a*100}%"></div>
+        </div>
+        <div class="prob-labels">
+          <span class="val ${lead?.label==='Home'?'lead':''}">Home ${pct(h)}</span>
+          <span class="val ${lead?.label==='Draw'?'lead':''}">Draw ${pct(d)}</span>
+          <span class="val ${lead?.label==='Away'?'lead':''}">Away ${pct(a)}</span>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+async function renderMatchweek(matchday) {
+  currentMatchday = matchday;
+  document.querySelectorAll('.mw-chip').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.matchday) === matchday);
+  });
+
+  const content = document.getElementById('content');
+  content.innerHTML = `<div class="section-title">Matchday ${matchday}</div><div class="fixtures">
+    <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
+
+  try {
+    const data = await getJSON(`/matchweek/${matchday}`);
+    if (!data.fixtures.length) {
+      content.innerHTML = `<div class="empty-state"><div class="icon">🔍</div>No fixtures for matchday ${matchday}.</div>`;
+      return;
+    }
+    content.innerHTML = `<div class="section-title">Matchday ${matchday}</div><div class="fixtures">
+      ${data.fixtures.map(fixtureCard).join('')}</div>`;
+
+    content.querySelectorAll('.fixture').forEach(el => {
+      el.addEventListener('click', () => openModal(parseInt(el.dataset.matchId), data.fixtures));
+    });
+    setStatus(true, 'Live');
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div>Couldn't load matchday ${matchday}.<br><span style="font-size:11px">${e.message}</span></div>`;
+  }
+}
+
+async function openModal(matchId, fixtures) {
+  const f = fixtures.find(x => x.match_id === matchId);
+  if (!f) return;
+  const overlay = document.getElementById('modal-overlay');
+  const modal = document.getElementById('modal');
+
+  modal.innerHTML = `
+    <div class="modal-close" onclick="closeModal()">✕</div>
+    <div class="modal-header">
+      <div class="team-col"><img src="${f.home_team_crest||''}" alt=""><div class="tname">${f.home_team}</div></div>
+      <div class="vs-mid">${f.status === 'FINISHED' ? (f.home_goals + ' – ' + f.away_goals) : fmtShortDate(f.utc_date)}</div>
+      <div class="team-col"><img src="${f.away_team_crest||''}" alt=""><div class="tname">${f.away_team}</div></div>
+    </div>
+    ${f.status !== 'FINISHED' ? `
+      <div class="modal-prob">
+        <div class="prob-bar">
+          <div class="seg home" style="width:${(f.home_win_prob??0.333)*100}%"></div>
+          <div class="seg draw" style="width:${(f.draw_prob??0.333)*100}%"></div>
+          <div class="seg away" style="width:${(f.away_win_prob??0.333)*100}%"></div>
+        </div>
+        <div class="prob-labels">
+          <span class="val">Home ${pct(f.home_win_prob)}</span>
+          <span class="val">Draw ${pct(f.draw_prob)}</span>
+          <span class="val">Away ${pct(f.away_win_prob)}</span>
+        </div>
+      </div>` : ''}
+    <div class="tabs">
+      <div class="tab active" data-tab="h2h">Head-to-head</div>
+      <div class="tab" data-tab="squads">Squads</div>
+    </div>
+    <div class="tab-panel active" id="panel-h2h"><div class="skeleton" style="height:120px"></div></div>
+    <div class="tab-panel" id="panel-squads"><div class="skeleton" style="height:120px"></div></div>
+  `;
+
+  overlay.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  modal.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      modal.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      modal.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  loadH2H(f);
+  loadSquads(f);
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('open');
+  document.body.style.overflow = '';
+}
+document.getElementById('modal-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'modal-overlay') closeModal();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+async function loadH2H(f) {
+  const panel = document.getElementById('panel-h2h');
+  try {
+    const data = await getJSON(`/h2h/${f.home_team_id}/${f.away_team_id}`);
+    if (!data.meetings_count) {
+      panel.innerHTML = `<div class="empty-state" style="padding:30px 10px"><div class="icon">🤝</div>No previous meetings in the last 3 seasons.</div>`;
+      return;
+    }
+    panel.innerHTML = `
+      <div class="h2h-summary">
+        <div class="h2h-stat"><div class="n" style="color:var(--home)">${data.team_a_wins}</div><div class="l">${f.home_team} wins</div></div>
+        <div class="h2h-stat"><div class="n" style="color:var(--draw)">${data.draws}</div><div class="l">Draws</div></div>
+        <div class="h2h-stat"><div class="n" style="color:var(--away)">${data.team_b_wins}</div><div class="l">${f.away_team} wins</div></div>
+      </div>
+      <div class="h2h-list">
+        ${data.history.map(m => `
+          <div class="h2h-row">
+            <div class="d">${fmtShortDate(m.utc_date)}</div>
+            <div class="t">${m.home_team}</div>
+            <div class="sc">${m.home_goals} – ${m.away_goals}</div>
+            <div class="t away-side">${m.away_team}</div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  } catch (e) {
+    panel.innerHTML = `<div class="empty-state" style="padding:30px 10px">Couldn't load head-to-head history.</div>`;
+  }
+}
+
+function squadColumn(team) {
+  if (!team || !team.squad || !team.squad.length) {
+    return `<div class="squad-col"><h4>No squad data</h4></div>`;
+  }
+  return `
+    <div class="squad-col">
+      <h4><img src="${team.crest||''}" alt="">${team.shortName || team.name}</h4>
+      <div class="squad-list">
+        ${team.squad.map(p => `
+          <div class="player-row"><span class="pname">${p.name}</span><span class="ppos">${p.position || ''}</span></div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+async function loadSquads(f) {
+  const panel = document.getElementById('panel-squads');
+  try {
+    const [teamA, teamB] = await Promise.all([
+      getJSON(`/team/${f.home_team_id}`),
+      getJSON(`/team/${f.away_team_id}`),
+    ]);
+    panel.innerHTML = `<div class="squads-grid">${squadColumn(teamA)}${squadColumn(teamB)}</div>`;
+  } catch (e) {
+    panel.innerHTML = `<div class="empty-state" style="padding:30px 10px">Couldn't load squads.</div>`;
+  }
+}
+
+async function init() {
+  try {
+    const data = await getJSON('/matchweeks');
+    matchweeksCache = data.matchweeks;
+    if (!matchweeksCache.length) {
+      setStatus(false, 'No data');
+      document.getElementById('content').innerHTML = `<div class="empty-state"><div class="icon">📭</div>No matchweeks available yet.</div>`;
+      return;
+    }
+    const picker = document.getElementById('mw-picker');
+    picker.innerHTML = matchweeksCache.map(mw => `
+      <div class="mw-chip" data-matchday="${mw.matchday}">
+        MD ${mw.matchday}
+        <span class="sub">${mw.n_finished === mw.n_fixtures ? 'Final' : fmtShortDate(mw.start_date)}</span>
+      </div>
+    `).join('');
+    picker.querySelectorAll('.mw-chip').forEach(el => {
+      el.addEventListener('click', () => renderMatchweek(parseInt(el.dataset.matchday)));
+    });
+
+    // default to the first matchweek that isn't fully finished, else the last one
+    const target = matchweeksCache.find(mw => mw.n_finished < mw.n_fixtures) || matchweeksCache[matchweeksCache.length - 1];
+    renderMatchweek(target.matchday);
+  } catch (e) {
+    setStatus(false, 'Waking up API…');
+    document.getElementById('content').innerHTML = `<div class="empty-state"><div class="icon">⏳</div>The API might be waking up from sleep (free tier). Retrying…</div>`;
+    setTimeout(init, 5000);
+  }
+}
+
+init();
+</script>
+</body>
+</html>

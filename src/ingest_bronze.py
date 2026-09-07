@@ -1,16 +1,19 @@
 """
 Phase 1 - Bronze ingestion for the PL Match Predictor.
 
-Pulls fixtures, results, and standings for the Premier League from
-football-data.org and lands the RAW JSON, untouched, into a
+Pulls fixtures, results, standings, and team/squad data for the Premier
+League from football-data.org and lands the RAW JSON, untouched, into a
 date-partitioned bronze folder. No cleaning/joining here on purpose -
 that's the silver layer's job.
 
 Pulls TWO seasons of matches:
   - the current season (for live/upcoming fixtures to predict)
-  - the most recently completed season (so there's enough finished,
-    feature-complete history to train a model on early in a new season,
-    when the current season alone doesn't have enough finished matches)
+  - the most recently completed season(s) (so there's enough finished,
+    feature-complete history to train a model on early in a new season)
+
+The `/competitions/PL/teams` call also returns each team's crest URL and
+full squad roster in one shot (no extra API calls needed) - used by the
+dashboard for team badges and squad lists.
 
 Usage:
     export FOOTBALL_DATA_API_KEY=xxxx
@@ -95,7 +98,7 @@ def main():
     out_path = land({"matches": merged_matches}, "matches", run_date)
     print(f"  -> landed {len(merged_matches)} total matches -> {out_path}")
 
-    # 2) Standings + teams - current season only (used for context, not training)
+    # 2) Standings + teams (crests + full squads in one call) - current season
     for name, endpoint in {
         "standings": f"competitions/{COMPETITION}/standings",
         "teams": f"competitions/{COMPETITION}/teams",

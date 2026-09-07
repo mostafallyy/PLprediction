@@ -43,11 +43,14 @@ def flatten_matches(raw: dict) -> pd.DataFrame:
                 "matchday": m.get("matchday"),
                 "home_team_id": m.get("homeTeam", {}).get("id"),
                 "home_team_name": m.get("homeTeam", {}).get("name"),
+                "home_team_crest": m.get("homeTeam", {}).get("crest"),
                 "away_team_id": m.get("awayTeam", {}).get("id"),
                 "away_team_name": m.get("awayTeam", {}).get("name"),
+                "away_team_crest": m.get("awayTeam", {}).get("crest"),
                 "home_goals": score.get("home"),
                 "away_goals": score.get("away"),
                 "winner": m.get("score", {}).get("winner"),  # HOME_TEAM / AWAY_TEAM / DRAW / None
+                "season_start_year": m.get("_season_start_year"),
             }
         )
     df = pd.DataFrame(rows)
