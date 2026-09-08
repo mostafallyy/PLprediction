@@ -47,6 +47,8 @@ PRE_MATCH_FEATURES = [
     "h2h_home_win_rate",
     "home_rest_days",
     "away_rest_days",
+    "home_manager_tenure_days",
+    "away_manager_tenure_days",
 ]
 
 TEST_FRACTION = 0.2   # most recent 20% of finished matches -> held-out test

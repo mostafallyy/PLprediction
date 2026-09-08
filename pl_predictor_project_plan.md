@@ -135,3 +135,44 @@ source and wired it into the pipeline properly rather than bolting it on:
 - [x] Fixed before it could bite: the Kaggle CSV was originally landed under `data/bronze/`, which is entirely gitignored - moved it to a new tracked path, `external_data/kaggle_epl_history.csv` (~730KB, committed on purpose), and pointed `silver_transform.py` at it there, so Render/Databricks deploys see the same 25-season depth as local dev instead of silently falling back to just the 4 API seasons.
 - [ ] Push `test` branch from PowerShell (device shell still can't do interactive GitHub OAuth) and confirm Render redeploys with the deeper dataset.
 
+
+### 2026-09-08 (later still): manager-tenure feature, and why player-level data was left out
+
+User asked for player and manager "form" data. Investigated three
+scraping targets before touching any code:
+
+- **Transfermarkt** - explicitly disallows scraping in its terms of
+  service and runs active anti-bot protection to enforce it. Declined
+  on principle (not just difficulty) - going around a site's ToS isn't
+  something this project does, "no cut corners" cuts both ways.
+- **Understat** - `robots.txt` is `Disallow: /` for every user agent.
+  Respected it, moved on.
+- **FBref (Sports Reference)** - Cloudflare bot-challenge on every
+  request; same category as Transfermarkt.
+- **API-Football (api-football.com/api-sports.io)** - a real, legitimate
+  API (not scraping) with a free tier covering player stats, injuries,
+  lineups and coaches. Flagged as a genuine option for later: needs the
+  user's own signup + API key, and the free tier (100 req/day) means a
+  multi-day backfill, not a same-day addition. Parked for now.
+
+**Shipped:** manager tenure, scraped from Wikipedia's "List of Premier
+League managers" page (CC BY-SA, robots.txt-permitted, no anti-bot
+wall) - `src/ingest_managers.py` pulls the full appointment history
+table (508 appointments, 51 clubs, back to 1992) into
+`external_data/manager_tenures.csv` (tracked in git, same reasoning as
+the Kaggle CSV). Chose this over the Kaggle CSV's extra shot/corner/card
+columns for the same reason those were rejected earlier: a feature has
+to work for LIVE predictions, not just backfilled history, and Wikipedia's
+table includes ongoing tenures so it covers both.
+
+- New pre-match features: `home_manager_tenure_days` / `away_manager_tenure_days` (days the manager has been in charge as of kickoff - a real, documented effect in football analytics, the "new manager bounce"). Joined via the same `team_key` as-of logic as rolling form; no leakage risk since only each manager's start date is used.
+- Coverage check before trusting it: all 27 current-era team_keys matched the Wikipedia table; 98.1% of matches fell inside a known tenure window (the ~2% gap is mostly short caretaker spells with unparseable Wikipedia dates, which the loader correctly treats as missing rather than guessing).
+- Result: modest, real improvement - LightGBM log loss 1.005 → 1.000, Logistic Regression 1.006 → 1.003, accuracy up to 0.523 (logreg) / 0.503 (lgbm) from 0.517/0.503. LightGBM still wins this run.
+- Re-verified `/health` and `/predictions` serve correctly with the new feature set.
+
+**Explicitly not done:** individual player-level form/injury data. No
+free source exists that's both ToS-compliant and usable for live
+(not just historical) predictions - this is being honest about a real
+limitation rather than faking placeholder data. API-Football is the
+legitimate path if the user wants to invest the multi-day backfill time.
+

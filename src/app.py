@@ -43,6 +43,8 @@ PRE_MATCH_FEATURES = [
     "h2h_home_win_rate",
     "home_rest_days",
     "away_rest_days",
+    "home_manager_tenure_days",
+    "away_manager_tenure_days",
 ]
 
 app = FastAPI(title="PL Match Predictor")

@@ -22,11 +22,23 @@ the SAME rolling form calculation. team_id/crest are still carried
 through as nullable columns purely for serving (crest images, the
 /team and /h2h endpoints) - Kaggle rows simply don't have them.
 
+Manager tenure (external_data/manager_tenures.csv, scraped from
+Wikipedia's full PL managerial appointment history - see
+ingest_managers.py) is joined the same as-of way: for each match, how
+many days has the home/away manager been in charge as of kickoff. This
+works for BOTH historical rows and live upcoming fixtures, unlike the
+extra match-stat columns in the Kaggle CSV (shots, corners, cards),
+which we deliberately did NOT add as features - those don't exist for
+2023-24+ matches at all, so they'd silently go stale/NaN for every
+live prediction once a team's rolling window aged out of Kaggle-era
+matches. A feature that only works on history isn't worth having.
+
 Features:
   - rolling form (points per game, goals for/against) over last N matches
   - home/away specific form splits
   - head-to-head record between the two teams
   - rest days since each team's previous match
+  - days the home/away manager has been in charge as of kickoff
 """
 
 from pathlib import Path
@@ -36,6 +48,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 SILVER_DIR = ROOT / "data" / "silver"
 GOLD_DIR = ROOT / "data" / "gold"
+MANAGER_TENURES_PATH = ROOT / "external_data" / "manager_tenures.csv"
 
 FORM_WINDOW = 5  # last N matches for rolling form
 
@@ -52,6 +65,8 @@ FEATURE_TAGS = {
     "h2h_home_win_rate": "pre_match",
     "home_rest_days": "pre_match",
     "away_rest_days": "pre_match",
+    "home_manager_tenure_days": "pre_match",
+    "away_manager_tenure_days": "pre_match",
     # kept for reference / label construction only - NEVER train on these
     "home_goals": "post_match",
     "away_goals": "post_match",
@@ -137,6 +152,51 @@ def team_form_asof(log: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(out_frames, ignore_index=True)
 
 
+def load_manager_tenures():
+    if not MANAGER_TENURES_PATH.exists():
+        return None
+    t = pd.read_csv(MANAGER_TENURES_PATH, parse_dates=["start_date", "end_date"])
+    t["start_date"] = t["start_date"].dt.tz_localize("UTC")
+    t["end_date"] = t["end_date"].dt.tz_localize("UTC")
+    return t
+
+
+def manager_tenure_asof(log: pd.DataFrame, tenures):
+    """For every (team, match) row, how many days had that team's manager
+    been in charge as of kickoff - real historical fact knowable at match
+    time, so no leakage risk (only start_date is used in the calculation).
+    NaN when the club/date isn't covered by the scraped tenure table (a
+    caretaker spell with an unparseable Wikipedia date, mostly) - that's
+    dropped later alongside any other missing pre-match feature."""
+    if tenures is None or tenures.empty:
+        log = log.copy()
+        log["manager_tenure_days"] = pd.NA
+        return log
+
+    out_frames = []
+    for team_key, grp in log.groupby("team_key"):
+        grp = grp.sort_values("utc_date").reset_index(drop=True)
+        t = tenures[tenures["team_key"] == team_key].sort_values("start_date")
+        if t.empty:
+            grp["manager_tenure_days"] = pd.NA
+            out_frames.append(grp)
+            continue
+        merged = pd.merge_asof(
+            grp, t[["start_date", "end_date"]],
+            left_on="utc_date", right_on="start_date", direction="backward",
+        )
+        # merge_asof only guarantees the most recent start <= match date -
+        # still need to confirm the match actually falls before that
+        # manager's recorded end_date (else it's a coverage gap, e.g. an
+        # interim spell we dropped for an unparseable date).
+        valid = merged["start_date"].notna() & (merged["end_date"].isna() | (merged["utc_date"] <= merged["end_date"]))
+        merged["manager_tenure_days"] = (merged["utc_date"] - merged["start_date"]).dt.days.where(valid)
+        merged = merged.drop(columns=["start_date", "end_date"])
+        out_frames.append(merged)
+
+    return pd.concat(out_frames, ignore_index=True)
+
+
 def head_to_head_rate(df: pd.DataFrame) -> pd.DataFrame:
     """Pre-match home-win rate in this fixture's history, using only past
     meetings - keyed on team_key so Kaggle-era meetings count too."""
@@ -165,9 +225,13 @@ def main():
     team_log = build_team_match_log(matches)
     form = team_form_asof(team_log)
 
+    tenures = load_manager_tenures()
+    mgr = manager_tenure_asof(team_log, tenures)
+
     form_lookup = form.set_index(["match_id", "team_key"])[
         ["form_ppg", "form_gf", "form_ga", "rest_days", "home_ppg_split", "away_ppg_split"]
     ]
+    mgr_lookup = mgr.set_index(["match_id", "team_key"])[["manager_tenure_days"]]
 
     matches = head_to_head_rate(matches)
 
@@ -176,6 +240,8 @@ def main():
         try:
             hf = form_lookup.loc[(m["match_id"], m["home_team_key"])]
             af = form_lookup.loc[(m["match_id"], m["away_team_key"])]
+            hm = mgr_lookup.loc[(m["match_id"], m["home_team_key"])]
+            am = mgr_lookup.loc[(m["match_id"], m["away_team_key"])]
         except KeyError:
             continue
         feat_rows.append(
@@ -201,6 +267,8 @@ def main():
                 "away_away_ppg": af["away_ppg_split"],
                 "home_rest_days": hf["rest_days"],
                 "away_rest_days": af["rest_days"],
+                "home_manager_tenure_days": hm["manager_tenure_days"],
+                "away_manager_tenure_days": am["manager_tenure_days"],
                 "h2h_home_win_rate": m["h2h_home_win_rate"],
                 # post-match, label-only columns - kept but flagged, never trained on
                 "home_goals": m["home_goals"],
