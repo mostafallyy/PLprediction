@@ -20,6 +20,7 @@ from pathlib import Path
 
 import joblib
 import lightgbm as lgb
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -47,19 +48,45 @@ PRE_MATCH_FEATURES = [
 app = FastAPI(title="PL Match Predictor")
 
 _model = None
+_scaler = None
+_model_type = None
 _label_encoder = None
 _teams = None
 
 
 def load_model():
-    global _model, _label_encoder
-    model_path = MODEL_DIR / "lgbm_model.txt"
+    """Loads whichever model won the train_model.py comparison (LightGBM or
+    Logistic Regression), as recorded in models/active_model.json. Both
+    model types are trained on the identical feature set and time-based
+    split, so either can be "active" - this just needs to know how to
+    load and call whichever one it is."""
+    global _model, _scaler, _model_type, _label_encoder
+    meta_path = MODEL_DIR / "active_model.json"
     encoder_path = MODEL_DIR / "label_encoder.joblib"
-    if not model_path.exists():
+    if not meta_path.exists():
         raise HTTPException(status_code=503, detail="Model not trained yet. Run src/train_model.py first.")
-    if _model is None:
+    if _model is not None:
+        return _model, _label_encoder
+
+    meta = json.loads(meta_path.read_text())
+    _model_type = meta["active_model_type"]
+    _label_encoder = joblib.load(encoder_path)
+
+    if _model_type == "lightgbm":
+        model_path = MODEL_DIR / "lgbm_model.txt"
+        if not model_path.exists():
+            raise HTTPException(status_code=503, detail="active_model.json says lightgbm but lgbm_model.txt is missing.")
         _model = lgb.Booster(model_file=str(model_path))
-        _label_encoder = joblib.load(encoder_path)
+    elif _model_type == "logistic_regression":
+        model_path = MODEL_DIR / "logreg_model.joblib"
+        scaler_path = MODEL_DIR / "logreg_scaler.joblib"
+        if not model_path.exists() or not scaler_path.exists():
+            raise HTTPException(status_code=503, detail="active_model.json says logistic_regression but logreg files are missing.")
+        _model = joblib.load(model_path)
+        _scaler = joblib.load(scaler_path)
+    else:
+        raise HTTPException(status_code=500, detail=f"Unknown active_model_type '{_model_type}' in active_model.json.")
+
     return _model, _label_encoder
 
 
@@ -79,13 +106,25 @@ def load_teams() -> dict:
 
 
 def predict_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Attach home/draw/away probabilities to rows that have complete pre-match features."""
+    """Attach home/draw/away probabilities to rows that have complete pre-match features.
+
+    Branches on which model type won training (see load_model()): a LightGBM
+    Booster.predict() call returns class probabilities directly, while the
+    Logistic Regression path needs the same StandardScaler used at train
+    time applied first, then sklearn's predict_proba()."""
     model, le = load_model()
     complete = df.dropna(subset=PRE_MATCH_FEATURES)
     if complete.empty:
         return df.assign(home_win_prob=None, draw_prob=None, away_win_prob=None)
-    probs = model.predict(complete[PRE_MATCH_FEATURES])
-    prob_cols = pd.DataFrame(probs, columns=le.classes_, index=complete.index)
+
+    X = complete[PRE_MATCH_FEATURES]
+    if _model_type == "lightgbm":
+        probs = model.predict(X)
+    else:  # logistic_regression
+        X_scaled = _scaler.transform(X)
+        probs = model.predict_proba(X_scaled)
+
+    prob_cols = pd.DataFrame(np.asarray(probs), columns=le.classes_, index=complete.index)
     out = df.join(prob_cols)
     return out.rename(columns={"HOME_TEAM": "home_win_prob", "DRAW": "draw_prob", "AWAY_TEAM": "away_win_prob"})
 

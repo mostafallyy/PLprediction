@@ -34,7 +34,7 @@ BRONZE_DIR = Path(__file__).resolve().parent.parent / "data" / "bronze"
 
 # football-data.org "season" is the year the season STARTS in (e.g. 2025 -> 2025-26)
 CURRENT_SEASON_START_YEAR = 2026
-TRAIN_SEASON_START_YEARS = [2025, 2024]  # last 2 completed seasons, for training history
+TRAIN_SEASON_START_YEARS = [2025, 2024, 2023]  # last 3 completed seasons available on the free tier (2022 and earlier return 403)
 
 
 def get_api_key() -> str:
