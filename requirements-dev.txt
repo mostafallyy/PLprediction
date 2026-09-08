@@ -1,0 +1,6 @@
+# Extra dependencies for offline analysis/training scripts only
+# (src/evaluate_model.py, src/classify_players_logreg.py) - NOT needed
+# by the deployed FastAPI service, so kept out of requirements.txt to
+# avoid bloating the Render build.
+statsmodels>=0.15
+matplotlib>=3.8
