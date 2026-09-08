@@ -29,7 +29,7 @@ spark.sql(f"CREATE DATABASE IF NOT EXISTS {CATALOG_DB}")
 API_BASE = "https://api.football-data.org/v4"
 COMPETITION = "PL"
 CURRENT_SEASON_START_YEAR = 2026
-TRAIN_SEASON_START_YEARS = [2025, 2024]
+TRAIN_SEASON_START_YEARS = [2025, 2024, 2023]  # last 3 completed seasons available on the free tier (2022 and earlier return 403) - matches src/ingest_bronze.py
 
 # COMMAND ----------
 
@@ -47,7 +47,7 @@ def fetch(endpoint, params=None):
 run_ts = datetime.now(timezone.utc)
 run_date = run_ts.strftime("%Y-%m-%d")
 
-# --- matches: current season + last 2 completed seasons, merged ---
+# --- matches: current season + last 3 completed seasons, merged ---
 all_matches = []
 seen_ids = set()
 for season in [CURRENT_SEASON_START_YEAR] + TRAIN_SEASON_START_YEARS:

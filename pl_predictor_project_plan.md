@@ -176,3 +176,29 @@ free source exists that's both ToS-compliant and usable for live
 limitation rather than faking placeholder data. API-Football is the
 legitimate path if the user wants to invest the multi-day backfill time.
 
+
+### 2026-09-08 (later still): Databricks pipeline brought back up to date
+
+The Databricks notebooks had fallen behind the three local-pipeline
+upgrades from earlier today (season expansion, Kaggle merge, manager
+tenure, dual-model comparison). Ported all three over to PySpark:
+
+- `01_bronze_ingest.py`: season list extended to match local (2023-24 through current, i.e. `[2025, 2024, 2023]` trailing).
+- `02_silver_transform.py`: now unions football-data.org rows with the Kaggle CSV (season_start_year < 2023 only, same no-overlap rule as local). The Kaggle CSV and manager_tenures.csv were uploaded to the workspace as Workspace Files (`/Workspace/Shared/pl_predictor/external_data/`) via the REST API, since Unity Catalog blocks DBFS but not `/Workspace` paths - read with plain pandas on the driver, same trick as before. Team-name normalization (`team_key`) is a Spark UDF, duplicated from `src/team_names.py` rather than imported (no clean cross-environment import path for a plain module on this serverless workspace).
+- `03_gold_features.py`: rolling form and head-to-head rekeyed from `team_id` to `team_key` (window functions, same as local's pandas rewrite). Manager tenure added as a broadcast range-condition join (start_date <= match_date <= end_date) against the small Wikipedia-scraped lookup table - conceptually the Spark equivalent of the local `merge_asof`.
+- `04_train_model.py`: now trains both LightGBM and Logistic Regression on the identical split and picks the winner by test log loss, matching local. The base64-to-Delta-table publish step (`pl_predictor_gold.latest_model`, the workaround for this Unity Catalog workspace blocking direct artifact download) now handles either model type.
+- **Bug caught during the first job run:** `spark.createDataFrame([model_row])` failed with `CANNOT_DETERMINE_TYPE` - Spark can't infer a schema when a dict column is `None` for every row, which is always true here (whichever model type didn't win has all-null serialization columns). Fixed with an explicit `StructType` schema instead of relying on inference.
+- Re-ran end-to-end via `runs/submit` on serverless job compute (same approach as the original validation) - **succeeded**. Queried the published Delta table via the SQL Warehouse: 9,820 finished matches, LightGBM log loss 1.0014 / logistic regression 1.0022, both beating the 1.0675 baseline - matches the local/Render numbers almost exactly.
+
+Databricks and the local/Render pipeline are now in sync on data and methodology (still two independently-trained models, as designed - not a shared artifact - but same features, same seasons, same comparison logic).
+
+### On scraping requests: FBref
+
+User asked about scraping fbref.com for player data. Declined for the
+same reason as Transfermarkt: FBref (Sports Reference) runs an active
+Cloudflare bot-challenge on requests (confirmed by testing `robots.txt`
+directly - it returned a JS challenge page, not the file) and Sports
+Reference's terms of service explicitly prohibit scraping/automated
+collection without a license. Pointed back to API-Football as the
+legitimate path; user is signing up for a free API key.
+
