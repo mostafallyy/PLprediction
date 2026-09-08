@@ -16,6 +16,7 @@ Then visit http://localhost:8000/
 """
 
 import json
+import sys
 from pathlib import Path
 
 import joblib
@@ -26,26 +27,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gold_features import CORE_FEATURES, ENRICHMENT_FEATURES, PRE_MATCH_FEATURES  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 GOLD_DIR = ROOT / "data" / "gold"
 MODEL_DIR = ROOT / "models"
 STATIC_DIR = ROOT / "static"
-
-PRE_MATCH_FEATURES = [
-    "home_form_ppg",
-    "home_form_gf",
-    "home_form_ga",
-    "away_form_ppg",
-    "away_form_gf",
-    "away_form_ga",
-    "home_home_ppg",
-    "away_away_ppg",
-    "h2h_home_win_rate",
-    "home_rest_days",
-    "away_rest_days",
-    "home_manager_tenure_days",
-    "away_manager_tenure_days",
-]
 
 app = FastAPI(title="PL Match Predictor")
 
@@ -53,6 +41,7 @@ _model = None
 _scaler = None
 _model_type = None
 _label_encoder = None
+_impute_medians = None
 _teams = None
 
 
@@ -62,7 +51,7 @@ def load_model():
     model types are trained on the identical feature set and time-based
     split, so either can be "active" - this just needs to know how to
     load and call whichever one it is."""
-    global _model, _scaler, _model_type, _label_encoder
+    global _model, _scaler, _model_type, _label_encoder, _impute_medians
     meta_path = MODEL_DIR / "active_model.json"
     encoder_path = MODEL_DIR / "label_encoder.joblib"
     if not meta_path.exists():
@@ -73,6 +62,12 @@ def load_model():
     meta = json.loads(meta_path.read_text())
     _model_type = meta["active_model_type"]
     _label_encoder = joblib.load(encoder_path)
+    # median fill values for ENRICHMENT features (h2h, manager tenure,
+    # prior-season squad stats), computed from the TRAINING split only -
+    # see train_model.py. A team missing one of these (e.g. no
+    # prior-season data because it just got promoted) still gets a real
+    # prediction from its CORE features instead of being dropped.
+    _impute_medians = meta.get("enrichment_impute_medians", {})
 
     if _model_type == "lightgbm":
         model_path = MODEL_DIR / "lgbm_model.txt"
@@ -108,16 +103,28 @@ def load_teams() -> dict:
 
 
 def predict_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Attach home/draw/away probabilities to rows that have complete pre-match features.
+    """Attach home/draw/away probabilities to rows that have complete CORE
+    pre-match features (rolling form, rest days) - a row missing one of
+    those genuinely has no history to predict from (a brand-new club's
+    first-ever match), so it correctly gets no prediction. ENRICHMENT
+    features (h2h, manager tenure, prior-season squad stats) are
+    median-imputed instead of required, using the same medians the
+    active model was trained with - otherwise, e.g., every newly
+    promoted club would silently lose predictions just for lacking
+    prior-season squad data.
 
     Branches on which model type won training (see load_model()): a LightGBM
     Booster.predict() call returns class probabilities directly, while the
     Logistic Regression path needs the same StandardScaler used at train
     time applied first, then sklearn's predict_proba()."""
     model, le = load_model()
-    complete = df.dropna(subset=PRE_MATCH_FEATURES)
+    complete = df.dropna(subset=CORE_FEATURES).copy()
     if complete.empty:
         return df.assign(home_win_prob=None, draw_prob=None, away_win_prob=None)
+
+    for col in ENRICHMENT_FEATURES:
+        if col in _impute_medians:
+            complete[col] = complete[col].fillna(_impute_medians[col])
 
     X = complete[PRE_MATCH_FEATURES]
     if _model_type == "lightgbm":
@@ -164,7 +171,7 @@ def health():
 def predictions():
     """Win/draw/loss probabilities for upcoming (SCHEDULED/TIMED) fixtures."""
     df = load_gold()
-    upcoming = df[df["status"].isin(["SCHEDULED", "TIMED"])].dropna(subset=PRE_MATCH_FEATURES)
+    upcoming = df[df["status"].isin(["SCHEDULED", "TIMED"])].dropna(subset=CORE_FEATURES)
     if upcoming.empty:
         return {"message": "No upcoming fixtures with complete pre-match features yet.", "predictions": []}
     scored = predict_rows(upcoming)

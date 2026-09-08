@@ -72,6 +72,8 @@ _ALIASES = {
     "BLACKPOOL": "BLACKPOOL",
     "READING": "READING",
     "BRENTFORD": "BRENTFORD",
+    "MANCHESTERUTD": "MANCHESTERUNITED",  # FBref squad-column spelling
+    "NOTTINGHAM": "NOTTINGHAMFOREST",  # FBref squad-column truncates to just "Nottingham"
 }
 
 _SUFFIX_RE = re.compile(r"\b(FC|AFC)\b")

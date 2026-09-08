@@ -6,6 +6,13 @@ Databricks with Delta Lake, a leakage-checked LightGBM model tracked in
 MLflow, and a FastAPI service that returns win/draw/loss probabilities
 for upcoming fixtures.
 
+## Data sources
+
+- [football-data.org](https://www.football-data.org/) - live fixtures, results, standings, team crests (free tier, 2023-24 season onward).
+- [Kaggle: EPL Match Data 2000-2025](https://www.kaggle.com/datasets/marcohuiii/english-premier-league-epl-match-data-2000-2025) (marcohuiii) - historical match results, 2000/01 through 2022-23, filling the gap the free API tier can't reach.
+- Wikipedia, [List of Premier League managers](https://en.wikipedia.org/wiki/List_of_Premier_League_managers) (CC BY-SA) - full managerial appointment history, used for the manager-tenure feature.
+- FBref / Sports Reference - player-season standard stats, 2015-16 through 2026-27, used for the prior-season squad-strength feature. Per FBref's data usage terms, this project credits Sports Reference (Data via [fbref.com](https://fbref.com), Sports Reference LLC) - only season-level aggregates are used, and only the immediately PRIOR completed season's totals are ever joined onto a match, never the match's own season (see `src/ingest_player_stats.py` for the leakage reasoning).
+
 ## Architecture
 
 ```

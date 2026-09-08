@@ -23,15 +23,34 @@ through as nullable columns purely for serving (crest images, the
 /team and /h2h endpoints) - Kaggle rows simply don't have them.
 
 Manager tenure (external_data/manager_tenures.csv, scraped from
-Wikipedia's full PL managerial appointment history - see
-ingest_managers.py) is joined the same as-of way: for each match, how
-many days has the home/away manager been in charge as of kickoff. This
-works for BOTH historical rows and live upcoming fixtures, unlike the
-extra match-stat columns in the Kaggle CSV (shots, corners, cards),
-which we deliberately did NOT add as features - those don't exist for
-2023-24+ matches at all, so they'd silently go stale/NaN for every
-live prediction once a team's rolling window aged out of Kaggle-era
-matches. A feature that only works on history isn't worth having.
+Wikipedia) and squad prior-season stats (external_data/
+player_season_stats.csv, cleaned from FBref) are joined the same
+as-of/lookup way: real facts knowable strictly before kickoff.
+
+CORE_FEATURES vs ENRICHMENT_FEATURES (used downstream by
+src/train_model.py and src/app.py, imported from here so the split
+can't drift out of sync between training and serving):
+  - CORE: rolling form, home/away splits, rest days. Missing on these
+    genuinely means "we know nothing about this team" (its first-ever
+    match in our combined history) - rows missing these are dropped,
+    not imputed, same as before.
+  - ENRICHMENT: head-to-head, manager tenure, prior-season squad
+    stats. These have much lower coverage by nature (h2h needs a prior
+    meeting; manager tenure only ~98% covered; prior-season squad
+    stats only exist for 2016-17 onward, since that's as far back as
+    the FBref data goes - 0% coverage before that). Dropping rows
+    missing ANY of these would have gutted the dataset (squad-stats
+    coverage alone is only ~33% of all finished matches - the other
+    67% are pre-2016 Kaggle seasons). Instead these are median-imputed
+    using ONLY the training split's median (see train_model.py) -
+    standard practice, and a team missing a prior-season squad stat is
+    treated as "average" rather than thrown out entirely.
+
+Deliberately NOT added: the Kaggle CSV's extra match-stat columns
+(shots, corners, cards) and current-season player aggregates - both
+would either go stale for live predictions or leak the season's own
+future results into early-season matches. See ingest_player_stats.py's
+docstring for the leakage argument on the squad-stats feature.
 
 Features:
   - rolling form (points per game, goals for/against) over last N matches
@@ -39,6 +58,9 @@ Features:
   - head-to-head record between the two teams
   - rest days since each team's previous match
   - days the home/away manager has been in charge as of kickoff
+  - home/away squad's PRIOR completed season: total goals, average
+    squad age, squad size (players used) - a fixed, leakage-safe proxy
+    for squad strength/depth/rotation carried into the new season
 """
 
 from pathlib import Path
@@ -49,24 +71,40 @@ ROOT = Path(__file__).resolve().parent.parent
 SILVER_DIR = ROOT / "data" / "silver"
 GOLD_DIR = ROOT / "data" / "gold"
 MANAGER_TENURES_PATH = ROOT / "external_data" / "manager_tenures.csv"
+PLAYER_SEASON_STATS_PATH = ROOT / "external_data" / "player_season_stats.csv"
 
 FORM_WINDOW = 5  # last N matches for rolling form
 
+CORE_FEATURES = [
+    "home_form_ppg",
+    "home_form_gf",
+    "home_form_ga",
+    "away_form_ppg",
+    "away_form_gf",
+    "away_form_ga",
+    "home_home_ppg",
+    "away_away_ppg",
+    "home_rest_days",
+    "away_rest_days",
+]
+
+ENRICHMENT_FEATURES = [
+    "h2h_home_win_rate",
+    "home_manager_tenure_days",
+    "away_manager_tenure_days",
+    "home_prev_season_goals",
+    "away_prev_season_goals",
+    "home_prev_season_avg_age",
+    "away_prev_season_avg_age",
+    "home_prev_season_squad_size",
+    "away_prev_season_squad_size",
+]
+
+PRE_MATCH_FEATURES = CORE_FEATURES + ENRICHMENT_FEATURES
+
 # Leakage discipline: every feature we build is tagged here.
 FEATURE_TAGS = {
-    "home_form_ppg": "pre_match",
-    "home_form_gf": "pre_match",
-    "home_form_ga": "pre_match",
-    "away_form_ppg": "pre_match",
-    "away_form_gf": "pre_match",
-    "away_form_ga": "pre_match",
-    "home_home_ppg": "pre_match",
-    "away_away_ppg": "pre_match",
-    "h2h_home_win_rate": "pre_match",
-    "home_rest_days": "pre_match",
-    "away_rest_days": "pre_match",
-    "home_manager_tenure_days": "pre_match",
-    "away_manager_tenure_days": "pre_match",
+    **{f: "pre_match" for f in PRE_MATCH_FEATURES},
     # kept for reference / label construction only - NEVER train on these
     "home_goals": "post_match",
     "away_goals": "post_match",
@@ -166,8 +204,8 @@ def manager_tenure_asof(log: pd.DataFrame, tenures):
     been in charge as of kickoff - real historical fact knowable at match
     time, so no leakage risk (only start_date is used in the calculation).
     NaN when the club/date isn't covered by the scraped tenure table (a
-    caretaker spell with an unparseable Wikipedia date, mostly) - that's
-    dropped later alongside any other missing pre-match feature."""
+    caretaker spell with an unparseable Wikipedia date, mostly) - an
+    ENRICHMENT feature, so this gets imputed downstream, not dropped."""
     if tenures is None or tenures.empty:
         log = log.copy()
         log["manager_tenure_days"] = pd.NA
@@ -195,6 +233,23 @@ def manager_tenure_asof(log: pd.DataFrame, tenures):
         out_frames.append(merged)
 
     return pd.concat(out_frames, ignore_index=True)
+
+
+def load_squad_prev_season_stats():
+    """Aggregate FBref player-season rows to one row per (squad, season),
+    then shift the season forward by one - so a lookup for season Y
+    returns squad Y-1's totals. That's the leakage-safe "carried over
+    from last season" feature described in ingest_player_stats.py."""
+    if not PLAYER_SEASON_STATS_PATH.exists():
+        return None
+    p = pd.read_csv(PLAYER_SEASON_STATS_PATH)
+    agg = p.groupby(["squad_key", "season_start_year"]).agg(
+        prev_season_goals=("gls", "sum"),
+        prev_season_avg_age=("age", "mean"),
+        prev_season_squad_size=("player", "nunique"),
+    ).reset_index()
+    agg["season_start_year"] = agg["season_start_year"] + 1  # now means "the season this applies TO"
+    return agg
 
 
 def head_to_head_rate(df: pd.DataFrame) -> pd.DataFrame:
@@ -228,12 +283,37 @@ def main():
     tenures = load_manager_tenures()
     mgr = manager_tenure_asof(team_log, tenures)
 
+    squad_stats = load_squad_prev_season_stats()
+
     form_lookup = form.set_index(["match_id", "team_key"])[
         ["form_ppg", "form_gf", "form_ga", "rest_days", "home_ppg_split", "away_ppg_split"]
     ]
     mgr_lookup = mgr.set_index(["match_id", "team_key"])[["manager_tenure_days"]]
 
     matches = head_to_head_rate(matches)
+
+    if squad_stats is not None:
+        matches = matches.merge(
+            squad_stats.rename(columns={
+                "squad_key": "home_team_key",
+                "prev_season_goals": "home_prev_season_goals",
+                "prev_season_avg_age": "home_prev_season_avg_age",
+                "prev_season_squad_size": "home_prev_season_squad_size",
+            }),
+            on=["home_team_key", "season_start_year"], how="left",
+        ).merge(
+            squad_stats.rename(columns={
+                "squad_key": "away_team_key",
+                "prev_season_goals": "away_prev_season_goals",
+                "prev_season_avg_age": "away_prev_season_avg_age",
+                "prev_season_squad_size": "away_prev_season_squad_size",
+            }),
+            on=["away_team_key", "season_start_year"], how="left",
+        )
+    else:
+        for c in ["home_prev_season_goals", "home_prev_season_avg_age", "home_prev_season_squad_size",
+                  "away_prev_season_goals", "away_prev_season_avg_age", "away_prev_season_squad_size"]:
+            matches[c] = pd.NA
 
     feat_rows = []
     for _, m in matches.iterrows():
@@ -269,6 +349,12 @@ def main():
                 "away_rest_days": af["rest_days"],
                 "home_manager_tenure_days": hm["manager_tenure_days"],
                 "away_manager_tenure_days": am["manager_tenure_days"],
+                "home_prev_season_goals": m["home_prev_season_goals"],
+                "away_prev_season_goals": m["away_prev_season_goals"],
+                "home_prev_season_avg_age": m["home_prev_season_avg_age"],
+                "away_prev_season_avg_age": m["away_prev_season_avg_age"],
+                "home_prev_season_squad_size": m["home_prev_season_squad_size"],
+                "away_prev_season_squad_size": m["away_prev_season_squad_size"],
                 "h2h_home_win_rate": m["h2h_home_win_rate"],
                 # post-match, label-only columns - kept but flagged, never trained on
                 "home_goals": m["home_goals"],
@@ -282,12 +368,15 @@ def main():
     out_path = GOLD_DIR / "match_features.parquet"
     gold.to_parquet(out_path, index=False)
 
-    pre_match_cols = [c for c, tag in FEATURE_TAGS.items() if tag == "pre_match"]
     n_finished = (gold["status"] == "FINISHED").sum()
     n_upcoming = gold["status"].isin(["SCHEDULED", "TIMED"]).sum()
     print(f"Gold feature table: {len(gold)} rows ({n_finished} finished, {n_upcoming} upcoming) -> {out_path}")
-    print(f"Pre-match (safe) features: {pre_match_cols}")
-    print(f"Post-match (label-only, never train on): {[c for c, t in FEATURE_TAGS.items() if t == 'post_match']}")
+    print(f"Core (required) features: {CORE_FEATURES}")
+    print(f"Enrichment (imputed if missing) features: {ENRICHMENT_FEATURES}")
+    finished = gold[gold["status"] == "FINISHED"]
+    for c in ENRICHMENT_FEATURES:
+        cov = finished[c].notna().mean()
+        print(f"  coverage - {c}: {cov:.1%}")
 
 
 if __name__ == "__main__":

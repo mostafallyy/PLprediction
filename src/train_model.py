@@ -14,6 +14,19 @@ serves - the choice is made by the numbers, not by default.
 
 Time-based train/val/test split - never random, that would leak future
 form into the past. Every run is logged to MLflow.
+
+CORE_FEATURES vs ENRICHMENT_FEATURES (imported from gold_features.py so
+this list can't drift out of sync with what the gold layer/app.py
+expect - see that module's docstring for the full reasoning). Rows
+missing a CORE feature are dropped (genuinely no data - a team's first
+match ever in our history). Rows missing an ENRICHMENT feature (h2h,
+manager tenure, prior-season squad stats - the last of which only goes
+back to 2016-17) are kept and median-imputed using ONLY the training
+split's median, computed after the split so no test-set information
+leaks into the imputation. Blanket-dropping on enrichment features
+would have thrown out roughly two-thirds of the dataset, since
+prior-season squad stats simply don't exist before FBref's 2016-17
+data - not worth it when imputation is the standard, correct fix.
 """
 
 import os
@@ -22,6 +35,8 @@ from pathlib import Path
 os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
 import json
+import sys
+
 import joblib
 import lightgbm as lgb
 import mlflow
@@ -31,25 +46,12 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gold_features import CORE_FEATURES, ENRICHMENT_FEATURES, PRE_MATCH_FEATURES  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 GOLD_DIR = ROOT / "data" / "gold"
 MODEL_DIR = ROOT / "models"
-
-PRE_MATCH_FEATURES = [
-    "home_form_ppg",
-    "home_form_gf",
-    "home_form_ga",
-    "away_form_ppg",
-    "away_form_gf",
-    "away_form_ga",
-    "home_home_ppg",
-    "away_away_ppg",
-    "h2h_home_win_rate",
-    "home_rest_days",
-    "away_rest_days",
-    "home_manager_tenure_days",
-    "away_manager_tenure_days",
-]
 
 TEST_FRACTION = 0.2   # most recent 20% of finished matches -> held-out test
 VAL_FRACTION = 0.15   # next most recent 15% of the remainder -> early-stopping val
@@ -94,30 +96,44 @@ def main():
         raise SystemExit("No gold table found. Run src/gold_features.py first.")
 
     df = pd.read_parquet(gold_path)
-    df = df[df["status"] == "FINISHED"].dropna(subset=PRE_MATCH_FEATURES + ["winner"])
+    # only CORE features + the label are required to be non-null - enrichment
+    # features are imputed below, per-split, after the time-based split.
+    df = df[df["status"] == "FINISHED"].dropna(subset=CORE_FEATURES + ["winner"])
     df = df.sort_values("utc_date").reset_index(drop=True)
 
     if len(df) < 20:
         raise SystemExit(
-            f"Only {len(df)} finished, feature-complete matches available - "
+            f"Only {len(df)} finished, core-feature-complete matches available - "
             "too few for a meaningful time-based split yet."
         )
 
     le = LabelEncoder()
     y = le.fit_transform(df["winner"])
-    X = df[PRE_MATCH_FEATURES]
+    X = df[PRE_MATCH_FEATURES].copy()
     n_classes = len(le.classes_)
 
     n = len(df)
     test_idx = int(n * (1 - TEST_FRACTION))
     val_idx = int(test_idx * (1 - VAL_FRACTION))
 
-    X_train, y_train = X.iloc[:val_idx], y[:val_idx]
-    X_val, y_val = X.iloc[val_idx:test_idx], y[val_idx:test_idx]
-    X_test, y_test = X.iloc[test_idx:], y[test_idx:]
+    X_train, y_train = X.iloc[:val_idx].copy(), y[:val_idx]
+    X_val, y_val = X.iloc[val_idx:test_idx].copy(), y[val_idx:test_idx]
+    X_test, y_test = X.iloc[test_idx:].copy(), y[test_idx:]
+
+    # median-impute ENRICHMENT features using ONLY the training split's
+    # median (fit before any scaling/training happens) - applied to
+    # train/val/test alike so no split sees a different fill value.
+    impute_medians = {c: float(X_train[c].median()) for c in ENRICHMENT_FEATURES}
+    for c in ENRICHMENT_FEATURES:
+        fill = impute_medians[c]
+        X_train[c] = X_train[c].fillna(fill)
+        X_val[c] = X_val[c].fillna(fill)
+        X_test[c] = X_test[c].fillna(fill)
 
     print(f"Time-based split: {len(X_train)} train / {len(X_val)} val (early stopping) / "
           f"{len(X_test)} test (chronological order: train -> val -> test)")
+    coverage = {c: round(float(df[c].notna().mean()), 3) for c in ENRICHMENT_FEATURES}
+    print(f"Enrichment feature coverage before imputation: {coverage}")
 
     baseline_ll = baseline_log_loss(y_test, n_classes)
     majority_acc = pd.Series(y_test).value_counts(normalize=True).max()
@@ -172,6 +188,9 @@ def main():
     active_model = {
         "active_model_type": winner,
         "features": PRE_MATCH_FEATURES,
+        "core_features": CORE_FEATURES,
+        "enrichment_features": ENRICHMENT_FEATURES,
+        "enrichment_impute_medians": impute_medians,
         "comparison": {
             k: {"accuracy": round(v["accuracy"], 4), "log_loss": round(v["log_loss"], 4)}
             for k, v in results.items()

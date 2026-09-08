@@ -202,3 +202,31 @@ Reference's terms of service explicitly prohibit scraping/automated
 collection without a license. Pointed back to API-Football as the
 legitimate path; user is signing up for a free API key.
 
+
+### 2026-09-08 (later still): player-season stats from user-supplied FBref data
+
+User provided `PLAYERDATA.txt` (923KB) - 14 pasted "Player Standard
+Stats" tables from FBref/Sports Reference, 2015-16 through 2026-27,
+copy-pasted by the user themselves (not scraped by this session -
+important distinction after the earlier Transfermarkt/FBref-scraping
+declines: this data was already in hand, obtained by the user directly
+through the site's normal page view, and FBref's own stated terms
+("please cite us and provide a link and/or a mention") anticipate this
+kind of use - a citation was added to README.md's new Data sources
+section rather than skipped).
+
+**Cleaning (`src/ingest_player_stats.py`):**
+- 14 season blocks, 2 were exact-duplicate pastes (2025-26, 2016-17 each appeared twice, byte-identical) - deduped: 7,500 raw rows -> 6,406 clean rows.
+- FBref's Age column format changes between exports - plain years ("25") in older pulls, years-days ("29-335") in newer ones - normalized to a single float.
+- Fixed a genuine mislabel before it shipped: the "G+A" (goals+assists combined) column was initially named `ga`, which reads like "goals against" - renamed to `g_plus_a` for clarity; the data itself was never wrong, just the column name.
+- Squad names checked against the existing team_key mapping: 2 of 35 didn't match ("Manchester Utd", a truncated "Nottingham") - extended team_names.py's alias table rather than silently dropping those two clubs' data.
+- Output: `external_data/player_season_stats.csv`, tracked in git (same reasoning as the other external sources).
+
+**Leakage-safe design:** a team's CURRENT season stats can't be used mid-season (a May goal tally "knows" about matches that haven't happened yet in August) - so gold_features.py aggregates player rows to squad-season totals and joins the PRIOR completed season's totals onto every match in the following season instead. New enrichment features: `{home,away}_prev_season_goals`, `{home,away}_prev_season_avg_age`, `{home,away}_prev_season_squad_size`.
+
+**Coverage forced a real design change.** Checked before assuming it'd just work: squad prior-season data only covers 33% of all finished matches (0% before 2016-17, since that's as far back as FBref's export goes; ~85% from 2016-17 onward). Blanket-requiring it via the existing `dropna(subset=PRE_MATCH_FEATURES)` pattern would have thrown out roughly two-thirds of the hard-won training set. Fixed properly rather than working around it: split every pre-match feature into `CORE_FEATURES` (rolling form, rest days - missing these genuinely means "no history," rows still dropped) and `ENRICHMENT_FEATURES` (h2h, manager tenure, squad prior-season stats - missing these gets median-imputed using ONLY the training split's median, computed after the time-based split so no leakage). Both lists now live in `gold_features.py` and are imported by `train_model.py` and `app.py`, instead of being hand-duplicated in three files (the actual root cause of an earlier near-miss where `app.py`'s feature list could have drifted out of sync).
+
+**Result:** training set grew to 9,748 usable rows (6,628 train / 1,170 val / 1,950 test) - up from 8,747 even before this change, since manager-tenure rows that used to get dropped under the old blanket-dropna are now recovered too. LightGBM log loss 1.002, logistic regression 1.013, both beat the 1.067 baseline; LightGBM stayed the active model. Re-verified `/health`, `/matchweeks`, `/predictions` all serve correctly.
+
+**Not yet done:** the Databricks notebooks were not updated for this change (still on the manager-tenure-only feature set) - same kind of drift as before, logged as an open item rather than silently left unmentioned.
+
