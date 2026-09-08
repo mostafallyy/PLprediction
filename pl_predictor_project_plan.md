@@ -298,3 +298,80 @@ now two features behind: manager-tenure-only feature set on Databricks
 vs. h2h + manager tenure + prior-season squad + star-power locally).
 Logged, not silently skipped - not touched this round without the user
 asking for it specifically.
+
+### 2026-09-08 (later still): defensive + goalkeeping data - fixed the attacker bias in impact tiers
+
+User caught a real gap immediately after the tier system shipped: "for
+defenders do we have tackles and such thats for defenders and
+midfielders" - correct. The impact_score formula up to this point was
+`minutes_share * (1 + 0.5 * non_penalty_G+A_per90)`, which is a fine
+proxy for attackers but has nothing to say about what a defender or
+defensive midfielder actually does - van Dijk was only ranking
+correctly because he plays every minute, not because the score saw any
+defensive contribution. User supplied two more FBref exports to fix
+this: `GoalKeeper.txt` (Player Goalkeeping - saves, goals against,
+clean sheets) and `dfDAtA.txt` (Player Miscellaneous Stats - fouls,
+tackles won, interceptions), both covering the same 2015-16 through
+2026-27 window as the original Standard Stats file.
+
+**Joining three raw tables (`src/ingest_player_stats.py`, rewritten):**
+verified all three tables share FBref's own player-id hash (confirmed
+against known players - Mohamed Salah is `e342ad68` in every one).
+Joined on `(player_id, season_start_year, squad)` rather than just
+`(player_id, season_start_year)`, since a mid-season transfer produces
+a separate row per club in EVERY one of these tables (126 such
+transfer-split rows found, e.g. Danny Ings Aston Villa -> West Ham
+2022-23) - joining on the id+season alone would have cross-multiplied
+those players. Season-block titles use different word positions per
+table ("Player Goalkeeping 2020-2021 Premier League (per 90)" has an
+extra suffix that shifts the old fixed-index season parser) - switched
+to a regex on the four-digit-dash-four-digit pattern so that can't
+break silently again.
+
+**Real data-coverage gap found, not a bug:** defensive-stats coverage
+came out to 91.2%, not 100%. Traced it down before assuming a join
+error - checked the raw 2015-16 Miscellaneous block directly and TklW/
+Int are blank for every single row that season (FBref's earliest
+season on the free tier simply doesn't have those columns populated).
+Every season 2016-17 onward matches at ~100%.
+
+**Reworked impact_score to be position-aware** (`classify_impact()`):
+outfield contribution is now
+`attack_weight(pos) * attack_per90 + defense_weight(pos) * defense_per90`,
+weights leaning toward attack for forwards (1.0/0.15), defense for
+defenders (0.15/1.0), and split evenly for midfielders (0.5/0.5) -
+hybrid position tags like "FWMF" average the weights of both codes.
+Goalkeepers get their own track entirely: `gk_quality` from save% and
+clean-sheet% relative to a rough league baseline (65%/25%) - flagged
+in the docstring as a simple proxy, since there's no shot-quality-
+adjusted (PSxG) data in these free tables.
+
+**Caught a second real bug during verification, not just the intended
+fix:** after wiring in defensive stats, a Liverpool defender with only
+2.6 nineties played this (very early, ~3-4 games in) 2026-27 season
+ranked Tier 1 ahead of a striker with 3 goals - because 9 defensive
+actions in one hot substitute appearance produces an extreme per-90
+RATE that has nothing to do with real season-long quality. Fixed with
+empirical-Bayes shrinkage: every player's attack_per90/defense_per90
+(and a goalkeeper's save%/clean-sheet%) is pulled toward that SEASON's
+typical rate, weighted by `PRIOR_NINETIES = 4.0` "pseudo-minutes" of
+the average - a full-season player is barely affected, a two-
+appearance player is pulled hard toward the league-typical rate. The
+prior itself is computed only from players who already have >=
+PRIOR_NINETIES of real minutes, so it isn't contaminated by the same
+small-sample noise it's meant to correct.
+
+**Result:** 6,406 player-seasons, 91.2% defensive-stat coverage (100%
+from 2016-17 on), 470/471 GK rows matched to goalkeeping stats. Tier
+distribution stayed roughly even (1182/1285/1276/1285/1378). Re-ran
+the full pipeline: gold layer unchanged at 10,170 rows (the n_stars/
+star_power features pick up the improved tiers automatically, no gold-
+layer code changes needed), LightGBM log loss 1.003 acc 0.505, still
+active model, still beats the 1.067 baseline. Re-verified `/team/64/
+impact` end-to-end against a live instance - van Dijk and Kerkez now
+correctly rank Tier 1 alongside the attacking talents, instead of
+defenders needing a full 90 minutes just to look average.
+
+**Not yet done:** Databricks notebooks still don't have any of the
+player-impact work (three features/one full pipeline stage behind
+local/Render now) - logged again, not touched without being asked.
