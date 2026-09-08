@@ -210,6 +210,7 @@ def fit_statsmodels_inference(X_train, y_train, feature_names, group_name):
         try:
             model = sm.MNLogit(y_sm, X_sm)
             result = model.fit(method="newton", maxiter=200, disp=0)
+            print(f"  McFadden pseudo R-squared: {result.prsquared:.4f}")
         except Exception as e:  # perfect separation / singular matrix on a tiny group
             print(f"  [{group_name}] statsmodels MNLogit failed to converge: {e}")
             return None

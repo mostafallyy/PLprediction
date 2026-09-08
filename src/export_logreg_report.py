@@ -89,11 +89,13 @@ def main():
         X_sm = sm.add_constant(pd.DataFrame(X_train_s, columns=features).reset_index(drop=True))
         y_sm = pd.Series(y_recoded).reset_index(drop=True)
         coefficients = []
+        pseudo_r2 = None
         if y_sm.nunique() >= 2:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 try:
                     mn_result = sm.MNLogit(y_sm, X_sm).fit(method="newton", maxiter=200, disp=0)
+                    pseudo_r2 = round(float(mn_result.prsquared), 4)  # McFadden's pseudo R-squared
                     recoded_to_tier = {0: 4, 1: 3, 2: 2, 3: 1}
                     for col in mn_result.params.columns:
                         tier = recoded_to_tier.get(col, col)
@@ -121,6 +123,7 @@ def main():
             "per_class_auc": per_class_auc,
             "roc_curves": roc_curves,
             "coefficients": coefficients,
+            "pseudo_r2": pseudo_r2,
         }
         print(f"{group}: exported ({len(gdf)} rows, acc={acc:.3f}, macro_auc={macro_auc:.3f})")
 
