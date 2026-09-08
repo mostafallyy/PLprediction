@@ -13,6 +13,15 @@ FINISHED matches only, then "as-of" merge that onto every match
 before that match's date. This is what lets an upcoming, unplayed
 fixture still get real pre-match features to predict on.
 
+Rolling form and head-to-head are joined on `team_key` (a normalized
+club-name string, see team_names.py), not the numeric team_id -
+football-data.org (2023-24+) and the Kaggle historical CSV (2000/01
+through 2022-23) don't share an id space, so team_key is what lets a
+club's Kaggle-era matches and its football-data.org-era matches feed
+the SAME rolling form calculation. team_id/crest are still carried
+through as nullable columns purely for serving (crest images, the
+/team and /h2h endpoints) - Kaggle rows simply don't have them.
+
 Features:
   - rolling form (points per game, goals for/against) over last N matches
   - home/away specific form splits
@@ -62,24 +71,24 @@ def build_team_match_log(df: pd.DataFrame) -> pd.DataFrame:
     """One row per (team, match) for ALL matches, finished or scheduled."""
     home = df.rename(
         columns={
-            "home_team_id": "team_id",
-            "away_team_id": "opp_id",
+            "home_team_key": "team_key",
+            "away_team_key": "opp_key",
             "home_goals": "gf",
             "away_goals": "ga",
         }
     ).assign(is_home=True)
     away = df.rename(
         columns={
-            "away_team_id": "team_id",
-            "home_team_id": "opp_id",
+            "away_team_key": "team_key",
+            "home_team_key": "opp_key",
             "away_goals": "gf",
             "home_goals": "ga",
         }
     ).assign(is_home=False)
 
-    cols = ["match_id", "utc_date", "team_id", "opp_id", "gf", "ga", "is_home", "status"]
+    cols = ["match_id", "utc_date", "team_key", "opp_key", "gf", "ga", "is_home", "status"]
     log = pd.concat([home[cols], away[cols]], ignore_index=True)
-    log = log.sort_values(["team_id", "utc_date"]).reset_index(drop=True)
+    log = log.sort_values(["team_key", "utc_date"]).reset_index(drop=True)
     return log
 
 
@@ -87,10 +96,11 @@ def team_form_asof(log: pd.DataFrame) -> pd.DataFrame:
     """
     For every (team, match) row - finished or scheduled - attach that
     team's rolling form as of strictly before that match, computed only
-    from the team's own FINISHED matches.
+    from the team's own FINISHED matches (which may span both data
+    sources, since they're keyed by the same normalized team_key).
     """
     out_frames = []
-    for team_id, grp in log.groupby("team_id"):
+    for team_key, grp in log.groupby("team_key"):
         grp = grp.sort_values("utc_date").reset_index(drop=True)
 
         finished = grp[grp["status"] == "FINISHED"].copy()
@@ -128,18 +138,19 @@ def team_form_asof(log: pd.DataFrame) -> pd.DataFrame:
 
 
 def head_to_head_rate(df: pd.DataFrame) -> pd.DataFrame:
-    """Pre-match home-win rate in this fixture's history, using only past meetings."""
+    """Pre-match home-win rate in this fixture's history, using only past
+    meetings - keyed on team_key so Kaggle-era meetings count too."""
     seen = {}
     rates = []
     for _, row in df.sort_values("utc_date").iterrows():
-        key = tuple(sorted([row["home_team_id"], row["away_team_id"]]))
+        key = tuple(sorted([row["home_team_key"], row["away_team_key"]]))
         history = seen.get(key, [])
-        rate = (sum(1 for h in history if h == row["home_team_id"]) / len(history)) if history else None
+        rate = (sum(1 for h in history if h == row["home_team_key"]) / len(history)) if history else None
         rates.append(rate)
         if row["status"] == "FINISHED" and row["winner"] == "HOME_TEAM":
-            seen.setdefault(key, []).append(row["home_team_id"])
+            seen.setdefault(key, []).append(row["home_team_key"])
         elif row["status"] == "FINISHED" and row["winner"] == "AWAY_TEAM":
-            seen.setdefault(key, []).append(row["away_team_id"])
+            seen.setdefault(key, []).append(row["away_team_key"])
     df = df.sort_values("utc_date").copy()
     df["h2h_home_win_rate"] = rates
     return df
@@ -154,7 +165,7 @@ def main():
     team_log = build_team_match_log(matches)
     form = team_form_asof(team_log)
 
-    form_lookup = form.set_index(["match_id", "team_id"])[
+    form_lookup = form.set_index(["match_id", "team_key"])[
         ["form_ppg", "form_gf", "form_ga", "rest_days", "home_ppg_split", "away_ppg_split"]
     ]
 
@@ -163,8 +174,8 @@ def main():
     feat_rows = []
     for _, m in matches.iterrows():
         try:
-            hf = form_lookup.loc[(m["match_id"], m["home_team_id"])]
-            af = form_lookup.loc[(m["match_id"], m["away_team_id"])]
+            hf = form_lookup.loc[(m["match_id"], m["home_team_key"])]
+            af = form_lookup.loc[(m["match_id"], m["away_team_key"])]
         except KeyError:
             continue
         feat_rows.append(

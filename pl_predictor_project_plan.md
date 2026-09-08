@@ -114,3 +114,24 @@ This single project touches every keyword in your target Winter 2027 postings �
 - [ ] Re-commit + push `test` branch (user pushes manually from PowerShell — device shell can't do interactive GitHub OAuth) and confirm Render redeploys cleanly with the new active model.
 - [ ] Re-verify `/predictions` and the frontend after the Render redeploy picks up logistic regression as the active model.
 
+
+### 2026-09-08 (later same day): wired in the Kaggle historical dataset
+
+User supplied `epl_final.csv` (Kaggle: marcohuiii/english-premier-league-epl-match-data-2000-2025,
+9380 matches, 2000/01–2024/25, with match stats but no team ids). Landed
+it at `data/bronze/kaggle_history/epl_final.csv` as a second bronze
+source and wired it into the pipeline properly rather than bolting it on:
+
+- **The id problem:** football-data.org gives numeric team ids; Kaggle only has club names, and the two sources don't share an id space. Fix: added `src/team_names.py`, a name-normalization module (strips FC/AFC + punctuation, plus an alias table for ~15 clubs whose short name doesn't collapse to their full name — "Man City" → same key as "Manchester City FC", "Spurs" → "Tottenham Hotspur FC", etc.). Every row in silver now carries a `team_key` alongside the nullable `team_id`.
+- **The overlap problem:** Kaggle runs through 2024/25, which overlaps the API's 2023-24+ coverage. Fix: Kaggle rows are only kept for `season_start_year < 2023` — API data wins for everything it covers (it has ids/crests/live status), Kaggle only fills the historical gap the free API tier can't reach (2000/01–2022/23).
+- **gold_features.py** was re-keyed from `team_id` to `team_key` for the rolling-form and head-to-head joins, so a club's Kaggle-era matches and its football-data.org-era matches feed the *same* rolling-form calculation. `team_id`/crest are still carried through as nullable columns purely for serving (crest images, `/team`, `/h2h`) — Kaggle rows don't have them, which is fine since Kaggle rows are never served directly, only used to deepen training history.
+- Verified match coverage: 26 of 27 current-era clubs matched cleanly to their Kaggle history; the one non-match (Luton Town) is correct, not a bug — their only PL season (2023-24) is already inside the API-covered range.
+- **Result:** finished-match training set went from 1,170 → 9,820 rows (5,947 train / 1,050 val / 1,750 test on the same chronological split). Both models now clearly separate from the naive baseline: LightGBM log loss 1.005, Logistic Regression 1.006, baseline 1.067 — accuracy up to ~50–52% from the low 40s. LightGBM narrowly won this run (previously logistic regression had won on the smaller dataset) — `active_model.json` and `app.py`'s dynamic loader handled the flip with no code changes needed, which is exactly what that refactor was for.
+- End-to-end re-tested locally (`/health`, `/matchweeks`, `/predictions`, `/team/{id}`) — all serving correctly against the new gold table.
+
+### Open / next (updated)
+- [ ] Kaggle CSV wired in for the LOCAL pipeline only — the Databricks (PySpark/Delta) notebooks still use the old 2-season, id-only approach and have NOT been updated to match (would need the same team_key join logic ported to Spark, plus landing the CSV into a Delta bronze table).
+- [ ] `/h2h` endpoint still matches on numeric `team_id`, so it only surfaces API-era (2023-24+) meetings between two teams, not the much deeper Kaggle-era history — a reasonable follow-up would be to also match on `team_key` there for teams that have one.
+- [x] Fixed before it could bite: the Kaggle CSV was originally landed under `data/bronze/`, which is entirely gitignored - moved it to a new tracked path, `external_data/kaggle_epl_history.csv` (~730KB, committed on purpose), and pointed `silver_transform.py` at it there, so Render/Databricks deploys see the same 25-season depth as local dev instead of silently falling back to just the 4 API seasons.
+- [ ] Push `test` branch from PowerShell (device shell still can't do interactive GitHub OAuth) and confirm Render redeploys with the deeper dataset.
+
