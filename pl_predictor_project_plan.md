@@ -375,3 +375,88 @@ defenders needing a full 90 minutes just to look average.
 **Not yet done:** Databricks notebooks still don't have any of the
 player-impact work (three features/one full pipeline stage behind
 local/Render now) - logged again, not touched without being asked.
+
+
+### 2026-09-08 (later still): logistic regression player-tier classifier + full statistical inference, and the manager title/tier work
+
+**Player-tier classifier.** The hand-written `impact_score` formula
+from the earlier phase is still what *defines* the 5 tiers, but on top
+of that we now fit an actual model to see how learnable those tiers
+are from the underlying box-score stats - one logistic regression per
+position group (FW/MF/DF/GK), features chosen to match how each
+position is actually judged: forwards on goal involvement (`gls_per90`,
+`ast_per90`, `gapk_per90`) plus `minutes_share`; midfielders split
+evenly between attack (`gapk_per90`) and defense (`def_actions_per90`);
+defenders on `def_actions_per90` and their team's clean-sheet rate;
+goalkeepers on `save_pct`, `cs_pct`, `saves_per90`, `ga90`. Every group
+also gets `minutes_share` as a bonus feature, per the brief. Split with
+`GroupShuffleSplit` keyed on `player_id` (not row) so the same player's
+different seasons never leak across train/test.
+
+**Two fits, two purposes, same training rows.** sklearn's
+`LogisticRegression` gives the predictive metrics (accuracy,
+precision/recall/F1 via `classification_report`, confusion matrix,
+one-vs-rest ROC curves + AUC per tier) scored on the held-out test
+set. statsmodels' `MNLogit`, fit separately on the *training* split
+only (test set never touched twice), gives the inference table -
+coefficient, std err, z-statistic, p-value, 95% CI per feature per
+tier, with Tier 5 (Fringe/Backup) recoded as the reference category -
+plus McFadden's pseudo R² (`result.prsquared`), added after an initial
+pass at the user's request. Results: FW acc 72.7%/AUC 0.946, MF acc
+69.2%/AUC 0.926 (pseudo R² 0.558), DF acc 77.2%/AUC 0.953 (pseudo R²
+0.654), GK acc 58.0%/AUC 0.843 (pseudo R² 0.560) - goalkeepers are the
+hardest group, expected given only 458 GK player-seasons versus
+1200-2600 for outfield groups. Honest caveat documented for the user:
+these features are largely the *same signal* the impact_score formula
+was built from, so high accuracy partly reflects circularity, not an
+independent validation - it does confirm the position-specific feature
+choices are internally consistent, which is real information even so.
+
+Also built `src/evaluate_model.py`, separate from the player classifier
+- reproduces `train_model.py`'s exact time-based split and runs
+`classification_report`/confusion matrix on the currently-active match
+predictor (LightGBM): 50.5% accuracy, beats the 44.2% baseline, but
+draw recall is only 0.2% - the model essentially never predicts a
+draw, a real weakness worth remembering if this comes up in an
+interview.
+
+**Statistical explainer artifact.** Published as a standalone Artifact
+page (not part of this repo - lives at
+`claude.ai/code/artifact/dca35222-4dda-4fe6-808f-ac7aa9192108`,
+title "Player Tier Classifier") covering all four position groups:
+glossary of terms (accuracy, confusion matrix, ROC/AUC, z-score/p-value,
+pseudo R²), per-group stat tiles, coefficient-significance tables, and
+click-to-expand ROC/confusion-matrix charts with plain-language
+captions generated from the actual numbers (biggest confusion cell,
+best/worst AUC tier, etc). Iterated twice on user feedback: (1) fixed
+a scroll-lock bug where the modal's caption was unreachable because
+the background page competed for scroll input; (2) gave each position
+group its own color (blue/orange/aqua/amber) instead of one shared
+green ramp, computed client-side via a `tierRamp()` hex-mixing function
+rather than CSS custom properties (inline per-section `--accent`
+values aren't visible to `getComputedStyle(document.documentElement)`,
+which is what broke the shared-color version); (3) made confusion-
+matrix cell numbers always white with a soft dark stroke, since a
+global `svg text { fill: var(--muted) }` rule was overriding the
+per-cell fill color via CSS specificity.
+
+**Manager tier classification.** New: `src/ingest_manager_titles.py`
+scrapes Wikipedia's "List of Premier League seasons" page (34 seasons,
+1992-93 to 2025-26) for the Champions column, then attributes each
+title to a specific manager by checking who covers the title club's
+`manager_tenures.csv` tenure window on ~25 May of the season's second
+year - all 34/34 seasons attributed cleanly (Ferguson 13, Guardiola 6,
+Wenger 3, Mourinho 3, then eight one-time winners). `src/
+classify_managers.py` then buckets all 302 managers from
+`manager_tenures.csv` into **top** (2+ titles, 4 managers), **mid**
+(exactly 1 title, 9 managers), **low** (0 titles, 289 managers) - a
+rule-based split rather than a percentile one, since 96% of managers
+have zero titles and a tercile cut on that distribution would be
+meaningless. Outputs `external_data/manager_titles.csv` and
+`external_data/manager_tiers.csv`, both tracked in git.
+
+**Not yet done:** the manager tier hasn't been wired into any API
+endpoint or match-predictor feature yet - just the data-layer
+classification so far. Databricks notebooks are now further behind
+(player-tier logreg + manager tiers, on top of the earlier-logged
+player-impact gap) - logged again, not touched without being asked.
