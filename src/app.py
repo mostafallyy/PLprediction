@@ -29,11 +29,13 @@ from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gold_features import CORE_FEATURES, ENRICHMENT_FEATURES, PRE_MATCH_FEATURES  # noqa: E402
+from team_names import normalize as normalize_team_name  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 GOLD_DIR = ROOT / "data" / "gold"
 MODEL_DIR = ROOT / "models"
 STATIC_DIR = ROOT / "static"
+PLAYER_SEASON_STATS_PATH = ROOT / "external_data" / "player_season_stats.csv"
 
 app = FastAPI(title="PL Match Predictor")
 
@@ -43,6 +45,7 @@ _model_type = None
 _label_encoder = None
 _impute_medians = None
 _teams = None
+_player_stats = None
 
 
 def load_model():
@@ -100,6 +103,17 @@ def load_teams() -> dict:
         teams_path = GOLD_DIR / "teams.json"
         _teams = json.loads(teams_path.read_text()) if teams_path.exists() else {}
     return _teams
+
+
+def load_player_stats() -> pd.DataFrame:
+    global _player_stats
+    if _player_stats is None:
+        _player_stats = (
+            pd.read_csv(PLAYER_SEASON_STATS_PATH)
+            if PLAYER_SEASON_STATS_PATH.exists()
+            else pd.DataFrame()
+        )
+    return _player_stats
 
 
 def predict_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -236,6 +250,54 @@ def team(team_id: int):
     if not t:
         raise HTTPException(status_code=404, detail=f"Unknown team id {team_id}")
     return t
+
+
+@app.get("/team/{team_id}/impact")
+def team_impact(team_id: int):
+    """Player impact tiers (1 = Talisman ... 5 = Fringe/Backup) for a
+    team's most recent season on record, from the FBref-derived
+    squad classification (see src/ingest_player_stats.py). This is
+    the same prior-season data the model trains on (as
+    prev_season_n_stars / prev_season_star_power) - here it's exposed
+    player-by-player instead of aggregated, so it's readable rather
+    than just a model input."""
+    teams = load_teams()
+    t = teams.get(str(team_id))
+    if not t:
+        raise HTTPException(status_code=404, detail=f"Unknown team id {team_id}")
+
+    stats = load_player_stats()
+    if stats.empty:
+        return {"team_id": team_id, "team_name": t.get("name"), "season_start_year": None, "players": []}
+
+    team_key = normalize_team_name(t.get("name", ""))
+    squad = stats[stats["squad_key"] == team_key]
+    if squad.empty:
+        return {"team_id": team_id, "team_name": t.get("name"), "season_start_year": None, "players": []}
+
+    latest_season = int(squad["season_start_year"].max())
+    squad = squad[squad["season_start_year"] == latest_season].sort_values("team_rank")
+
+    players = [
+        {
+            "player": r["player"],
+            "position": r["pos"],
+            "nation": r["nation"],
+            "age": r["age"] if pd.notna(r["age"]) else None,
+            "nineties": round(float(r["nineties"]), 1) if pd.notna(r["nineties"]) else None,
+            "goals": int(r["gls"]) if pd.notna(r["gls"]) else None,
+            "assists": int(r["ast"]) if pd.notna(r["ast"]) else None,
+            "tier": int(r["tier"]),
+            "tier_label": r["tier_label"],
+        }
+        for _, r in squad.iterrows()
+    ]
+    return {
+        "team_id": team_id,
+        "team_name": t.get("name"),
+        "season_start_year": latest_season,
+        "players": players,
+    }
 
 
 @app.get("/h2h/{team_a_id}/{team_b_id}")

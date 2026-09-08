@@ -6,4 +6,5 @@ __pycache__/
 .env
 .databricks_env
 .ipynb_checkpoints/
-PLAYERDATA.txt  # raw FBref copy-paste dump - only the cleaned external_data/player_season_stats.csv is tracked
+# raw FBref copy-paste dump - only the cleaned external_data/player_season_stats.csv is tracked
+PLAYERDATA.txt

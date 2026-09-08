@@ -98,6 +98,10 @@ ENRICHMENT_FEATURES = [
     "away_prev_season_avg_age",
     "home_prev_season_squad_size",
     "away_prev_season_squad_size",
+    "home_prev_season_n_stars",
+    "away_prev_season_n_stars",
+    "home_prev_season_star_power",
+    "away_prev_season_star_power",
 ]
 
 PRE_MATCH_FEATURES = CORE_FEATURES + ENRICHMENT_FEATURES
@@ -239,7 +243,16 @@ def load_squad_prev_season_stats():
     """Aggregate FBref player-season rows to one row per (squad, season),
     then shift the season forward by one - so a lookup for season Y
     returns squad Y-1's totals. That's the leakage-safe "carried over
-    from last season" feature described in ingest_player_stats.py."""
+    from last season" feature described in ingest_player_stats.py.
+
+    prev_season_n_stars / prev_season_star_power summarize the 5-tier
+    impact classification (see ingest_player_stats.py's classify_impact)
+    into two squad-level numbers: how many Tier-1/2 ("Talisman"/"Key
+    Player") players the squad had, and the total impact score across
+    the whole squad - a proxy for "how much proven, trusted quality did
+    this team carry into the season" that a raw goals tally alone can't
+    capture (a defense-heavy squad can have plenty of star power with
+    modest goal counts)."""
     if not PLAYER_SEASON_STATS_PATH.exists():
         return None
     p = pd.read_csv(PLAYER_SEASON_STATS_PATH)
@@ -247,6 +260,8 @@ def load_squad_prev_season_stats():
         prev_season_goals=("gls", "sum"),
         prev_season_avg_age=("age", "mean"),
         prev_season_squad_size=("player", "nunique"),
+        prev_season_n_stars=("tier", lambda s: int((s <= 2).sum())),
+        prev_season_star_power=("impact_score", "sum"),
     ).reset_index()
     agg["season_start_year"] = agg["season_start_year"] + 1  # now means "the season this applies TO"
     return agg
@@ -299,6 +314,8 @@ def main():
                 "prev_season_goals": "home_prev_season_goals",
                 "prev_season_avg_age": "home_prev_season_avg_age",
                 "prev_season_squad_size": "home_prev_season_squad_size",
+                "prev_season_n_stars": "home_prev_season_n_stars",
+                "prev_season_star_power": "home_prev_season_star_power",
             }),
             on=["home_team_key", "season_start_year"], how="left",
         ).merge(
@@ -307,12 +324,16 @@ def main():
                 "prev_season_goals": "away_prev_season_goals",
                 "prev_season_avg_age": "away_prev_season_avg_age",
                 "prev_season_squad_size": "away_prev_season_squad_size",
+                "prev_season_n_stars": "away_prev_season_n_stars",
+                "prev_season_star_power": "away_prev_season_star_power",
             }),
             on=["away_team_key", "season_start_year"], how="left",
         )
     else:
         for c in ["home_prev_season_goals", "home_prev_season_avg_age", "home_prev_season_squad_size",
-                  "away_prev_season_goals", "away_prev_season_avg_age", "away_prev_season_squad_size"]:
+                  "away_prev_season_goals", "away_prev_season_avg_age", "away_prev_season_squad_size",
+                  "home_prev_season_n_stars", "away_prev_season_n_stars",
+                  "home_prev_season_star_power", "away_prev_season_star_power"]:
             matches[c] = pd.NA
 
     feat_rows = []
@@ -355,6 +376,10 @@ def main():
                 "away_prev_season_avg_age": m["away_prev_season_avg_age"],
                 "home_prev_season_squad_size": m["home_prev_season_squad_size"],
                 "away_prev_season_squad_size": m["away_prev_season_squad_size"],
+                "home_prev_season_n_stars": m["home_prev_season_n_stars"],
+                "away_prev_season_n_stars": m["away_prev_season_n_stars"],
+                "home_prev_season_star_power": m["home_prev_season_star_power"],
+                "away_prev_season_star_power": m["away_prev_season_star_power"],
                 "h2h_home_win_rate": m["h2h_home_win_rate"],
                 # post-match, label-only columns - kept but flagged, never trained on
                 "home_goals": m["home_goals"],

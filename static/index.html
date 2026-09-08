@@ -184,6 +184,19 @@
   .player-row { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; padding: 6px 10px; border-radius: 8px; background: var(--bg-elev); }
   .player-row .pname { font-weight: 600; }
   .player-row .ppos { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em; }
+  .impact-col h4 { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 0 0 10px; }
+  .impact-col h4 img { width: 20px; height: 20px; object-fit: contain; }
+  .impact-list { display: flex; flex-direction: column; gap: 5px; max-height: 340px; overflow-y: auto; }
+  .impact-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12.5px; padding: 6px 10px; border-radius: 8px; background: var(--bg-elev); }
+  .impact-row .iname { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .impact-row .istats { color: var(--text-faint); font-size: 10.5px; white-space: nowrap; }
+  .tier-badge { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 3px 7px; border-radius: 999px; white-space: nowrap; }
+  .tier-1 { background: rgba(124,92,255,0.18); color: #a794ff; border: 1px solid rgba(124,92,255,0.4); }
+  .tier-2 { background: rgba(79,214,168,0.14); color: var(--home); border: 1px solid rgba(79,214,168,0.35); }
+  .tier-3 { background: rgba(255,204,102,0.14); color: var(--draw); border: 1px solid rgba(255,204,102,0.35); }
+  .tier-4 { background: rgba(139,147,167,0.14); color: var(--text-dim); border: 1px solid var(--border); }
+  .tier-5 { background: rgba(255,107,122,0.1); color: var(--text-faint); border: 1px solid var(--border); }
+
 
   footer { text-align: center; margin-top: 50px; color: var(--text-faint); font-size: 11.5px; line-height: 1.7; }
   footer a { color: var(--text-dim); text-decoration: underline; text-underline-offset: 2px; }
@@ -374,9 +387,11 @@ async function openModal(matchId, fixtures) {
     <div class="tabs">
       <div class="tab active" data-tab="h2h">Head-to-head</div>
       <div class="tab" data-tab="squads">Squads</div>
+      <div class="tab" data-tab="impact">Player Impact</div>
     </div>
     <div class="tab-panel active" id="panel-h2h"><div class="skeleton" style="height:120px"></div></div>
     <div class="tab-panel" id="panel-squads"><div class="skeleton" style="height:120px"></div></div>
+    <div class="tab-panel" id="panel-impact"><div class="skeleton" style="height:120px"></div></div>
   `;
 
   overlay.classList.add('open');
@@ -393,6 +408,7 @@ async function openModal(matchId, fixtures) {
 
   loadH2H(f);
   loadSquads(f);
+  loadImpact(f);
 }
 
 function closeModal() {
@@ -460,6 +476,39 @@ async function loadSquads(f) {
     panel.innerHTML = `<div class="squads-grid">${squadColumn(teamA)}${squadColumn(teamB)}</div>`;
   } catch (e) {
     panel.innerHTML = `<div class="empty-state" style="padding:30px 10px">Couldn't load squads.</div>`;
+  }
+}
+
+function impactColumn(data, fallbackName) {
+  if (!data || !data.players || !data.players.length) {
+    return `<div class="impact-col"><h4>${fallbackName || 'No data'}</h4><div class="empty-state" style="padding:16px 0;font-size:11.5px">No player-impact data for this club yet.</div></div>`;
+  }
+  return `
+    <div class="impact-col">
+      <h4>${data.team_name || fallbackName}${data.season_start_year ? ` <span style="color:var(--text-faint);font-weight:500;font-size:11px">(${data.season_start_year}-${String(data.season_start_year+1).slice(2)})</span>` : ''}</h4>
+      <div class="impact-list">
+        ${data.players.map(p => `
+          <div class="impact-row">
+            <span class="iname">${p.player}</span>
+            <span class="istats">${p.goals ?? 0}G ${p.assists ?? 0}A · ${p.nineties ?? '–'} 90s</span>
+            <span class="tier-badge tier-${p.tier}">${p.tier_label}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+async function loadImpact(f) {
+  const panel = document.getElementById('panel-impact');
+  try {
+    const [teamA, teamB] = await Promise.all([
+      getJSON(`/team/${f.home_team_id}/impact`),
+      getJSON(`/team/${f.away_team_id}/impact`),
+    ]);
+    panel.innerHTML = `<div class="squads-grid">${impactColumn(teamA, f.home_team)}${impactColumn(teamB, f.away_team)}</div>`;
+  } catch (e) {
+    panel.innerHTML = `<div class="empty-state" style="padding:30px 10px">Couldn't load player-impact tiers.</div>`;
   }
 }
 

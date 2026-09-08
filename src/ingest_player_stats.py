@@ -1,8 +1,12 @@
 """
-Phase 2e - Player-season stats for the PL Match Predictor.
+Phase 2e - Player-season stats + impact tiers for the PL Match Predictor.
 
 Cleans PLAYERDATA.txt (raw copy-pasted "Player Standard Stats" tables
-from FBref/Sports Reference, 2015-16 through 2026-27) into a tidy CSV.
+from FBref/Sports Reference, 2015-16 through 2026-27 - roughly the last
+10 years, and as far back as FBref's free tables go) into a tidy CSV,
+then classifies every player-season into one of 5 impact tiers within
+their own squad that season.
+
 Per FBref's stated data-usage terms ("When using SR data, please cite
 us and provide a link and/or a mention") this project credits FBref -
 see the README data-sources section.
@@ -28,12 +32,32 @@ Raw file quirks handled here:
     all match the alias table in team_names.py - extended it rather
     than silently losing those two clubs' rows.
 
+Impact classification (5 tiers, computed WITHIN each squad-season,
+never across squads - a "Tier 1" at a relegation candidate and a
+"Tier 1" at a title contender aren't claimed to be equally good
+players, just equally central to THEIR OWN team that season):
+  impact_score = minutes_share * (1 + 0.5 * non_penalty_G+A_per90)
+  where minutes_share = this player's 90s played / the SQUAD's total
+  90s played that season. Minutes share is the dominant term on
+  purpose - it's the best available proxy for "the manager trusted
+  this player," which is what makes a rock-solid, low-scoring
+  centre-back rank as high-impact and a bit-part player who got a
+  couple of goals in mop-up minutes rank low, not the other way
+  around. Per-90 output is a secondary multiplier, not a substitute.
+  Players are then ranked by impact_score within (squad, season) and
+  split into 5 equal-count tiers by rank (not qcut - qcut breaks on
+  the many tied/near-zero scores from single-appearance players).
+
+Tiers: 1 = Talisman (top ~20% by impact), 2 = Key Player,
+3 = Regular Starter, 4 = Squad Rotation, 5 = Fringe/Backup.
+
 Output: external_data/player_season_stats.csv, tracked in git (same
 reasoning as the Kaggle CSV and manager tenures - the deployed service
 needs to see it too).
 """
 
 import csv
+import math
 import sys
 from pathlib import Path
 
@@ -45,6 +69,14 @@ from team_names import normalize  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 RAW_PATH = ROOT / "PLAYERDATA.txt"
 OUT_PATH = ROOT / "external_data" / "player_season_stats.csv"
+
+TIER_LABELS = {
+    1: "Talisman",
+    2: "Key Player",
+    3: "Regular Starter",
+    4: "Squad Rotation",
+    5: "Fringe/Backup",
+}
 
 # Column layout after FBref's two-row header (category row + name row)
 # collapses to one row - verified against the raw file by hand.
@@ -101,6 +133,23 @@ def parse_season_blocks(lines: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def classify_impact(df: pd.DataFrame) -> pd.DataFrame:
+    """Adds impact_score, team_rank, tier (1-5), tier_label - computed
+    within each (squad_key, season_start_year) group."""
+    df = df.copy()
+    squad_total_nineties = df.groupby(["squad_key", "season_start_year"])["nineties"].transform("sum")
+    minutes_share = (df["nineties"] / squad_total_nineties).fillna(0)
+    df["impact_score"] = (minutes_share * (1 + 0.5 * df["gapk_per90"].fillna(0))).round(4)
+
+    df["team_rank"] = df.groupby(["squad_key", "season_start_year"])["impact_score"] \
+        .rank(method="first", ascending=False).astype(int)
+    group_size = df.groupby(["squad_key", "season_start_year"])["impact_score"].transform("size")
+    percentile = df["team_rank"] / group_size
+    df["tier"] = percentile.apply(lambda p: min(5, math.ceil(p * 5)))
+    df["tier_label"] = df["tier"].map(TIER_LABELS)
+    return df
+
+
 def main():
     if not RAW_PATH.exists():
         sys.exit(f"{RAW_PATH} not found.")
@@ -122,14 +171,16 @@ def main():
     for c in numeric_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
+    df = classify_impact(df)
+
     out = df[[
         "player", "player_id", "nation", "pos", "squad", "squad_key",
         "age", "born", "season_start_year",
         "mp", "starts", "min", "nineties",
         "gls", "ast", "g_plus_a", "gpk", "pk", "pkatt", "crdy", "crdr",
         "gls_per90", "ast_per90", "g_plus_a_per90", "gpk_per90", "gapk_per90",
-    ]].sort_values(["season_start_year", "squad_key", "player"])
-
+        "impact_score", "team_rank", "tier", "tier_label",
+    ]].sort_values(["season_start_year", "squad_key", "team_rank"])
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(OUT_PATH, index=False)
@@ -137,6 +188,8 @@ def main():
     print(f"Player-season stats: {len(out)} rows ({n_raw} raw, {n_deduped} exact-duplicate rows dropped) "
           f"across {out['season_start_year'].nunique()} seasons, {out['squad_key'].nunique()} squads -> {OUT_PATH}")
     print(f"Seasons: {sorted(out['season_start_year'].unique())}")
+    print("Tier distribution:")
+    print(out["tier_label"].value_counts().reindex(TIER_LABELS.values()).to_string())
 
 
 if __name__ == "__main__":

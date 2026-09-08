@@ -230,3 +230,71 @@ section rather than skipped).
 
 **Not yet done:** the Databricks notebooks were not updated for this change (still on the manager-tenure-only feature set) - same kind of drift as before, logged as an open item rather than silently left unmentioned.
 
+
+### 2026-09-08 (later still): player impact tiers - classification, model features, API, frontend
+
+User's request: "the teams and players form is very important for the
+last 10 years... lets use 10 years of player form and track each player
+and classify players into 5 categories based on their impact in their
+own team so users can see that and it can be used in prediction." Two
+deliverables implied - a feature for the model, and something visible
+to users - both done.
+
+**Classification (`src/ingest_player_stats.py`, `classify_impact()`):**
+`impact_score = minutes_share * (1 + 0.5 * non_penalty_G+A_per90)`, where
+`minutes_share` = a player's 90s played / their squad's total 90s that
+season - the dominant term on purpose, since minutes trusted by the
+manager is the best available proxy for "how central is this player to
+this team," and per-90 output is a secondary multiplier rather than a
+substitute (a nailed-on, low-scoring centre-back should still rank
+above a mop-up-minutes player with a couple of garbage-time goals).
+Ranked within `(squad_key, season_start_year)` only - never across
+squads, so a "Tier 1" at a relegation candidate isn't claimed to be
+equal to a "Tier 1" at a title contender, just equally central to their
+own team that season. Split into 5 equal-count tiers by rank (not
+`qcut` - broke on the many tied/near-zero scores from single-appearance
+players): 1 Talisman, 2 Key Player, 3 Regular Starter, 4 Squad
+Rotation, 5 Fringe/Backup. 6,406 rows -> tier distribution roughly even
+(1182/1285/1276/1285/1378). Spot-checked against known players: Salah
+and Haaland come back Tier 1 in their peak seasons; van Dijk correctly
+drops to Tier 4 (Squad Rotation) specifically during his 2020-21
+injury-recovery season, not any other - the minutes-share design is
+doing what it's supposed to.
+
+**New model features (`src/gold_features.py`, `load_squad_prev_season_stats()`):**
+added `{home,away}_prev_season_n_stars` (count of Tier 1/2 players on
+last season's squad) and `{home,away}_prev_season_star_power` (sum of
+impact_score across the squad) to `ENRICHMENT_FEATURES`, joined the
+same leakage-safe way as the other prior-season squad aggregates
+(prior COMPLETED season only, median-imputed pre-2016-17 where FBref
+data doesn't exist). Re-ran the full pipeline: gold layer 10,170 rows
+(9,820 finished), enrichment coverage h2h 89.1%, manager_tenure 98.1%,
+all prev_season_* features 33.1-33.4% (unchanged - same coverage
+ceiling as before, just two more columns riding along). Training:
+LightGBM log loss 1.003 / acc 0.507, logistic regression log loss
+1.019 / acc 0.502, both still beat the 1.067 baseline; split
+6,628/1,170/1,950 train/val/test.
+
+**New API endpoint (`src/app.py`, `GET /team/{team_id}/impact`):**
+looks up a team's `team_key`, finds its most recent season in
+`player_season_stats.csv`, returns the full squad sorted by
+`team_rank` with tier/tier_label plus basic stats (goals, assists,
+90s played). Tested end-to-end against a live uvicorn instance -
+`/team/64/impact` (Liverpool) returned Isak/Wirtz/Gakpo as Talismans
+and van Dijk as Key Player for the current 2026-27 season, which
+matches the small early-season sample sensibly.
+
+**Frontend (`static/index.html`):** added a third "Player Impact" tab
+next to "Head-to-head"/"Squads" in the fixture modal - two columns
+(home/away), each player shown with a tier badge (color-coded by tier)
+plus goals/assists/90s-played, loaded from the new endpoint the same
+way the existing Squads tab loads `/team/{id}`. This is the "so users
+can see that" half of the request - the model-feature half was already
+covered by n_stars/star_power above.
+
+**Not yet done:** Databricks notebooks still don't have the
+player-impact features (same drift-tracking note as the prior entry -
+now two features behind: manager-tenure-only feature set on Databricks
+vs. h2h + manager tenure + prior-season squad + star-power locally).
+Logged, not silently skipped - not touched this round without the user
+asking for it specifically.
